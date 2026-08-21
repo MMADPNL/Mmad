@@ -151,7 +151,7 @@ async def start(
         )
     )
 
-await update.message.reply_text(
+async def game_command(update, context):
 
     "🎮 بازی ساخته شد\n\n"
     f"👤 سازنده: {user_display(user.id)}\n\n"
