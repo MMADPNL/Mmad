@@ -236,6 +236,80 @@ def ensure_user(user):
     return user_data
 
 
+def create_user_by_id(user_id):
+    """
+    ساخت کاربر فقط با آیدی عددی.
+    برای شارژ قبل از /start استفاده می‌شود.
+    """
+
+    try:
+        user_id = int(user_id)
+    except Exception:
+        return False
+
+    if user_id <= 0:
+        return False
+
+    uid = str(user_id)
+
+    if uid not in data["users"]:
+
+        data["users"][uid] = {
+            "id": user_id,
+            "username": "",
+            "name": "",
+            "balance": 0,
+            "referrals": [],
+            "referred_by": None,
+            "created_at": datetime.now().isoformat(),
+        }
+
+        save_data(data)
+
+    else:
+
+        user_data = data["users"][uid]
+
+        user_data.setdefault(
+            "id",
+            user_id
+        )
+
+        user_data.setdefault(
+            "username",
+            ""
+        )
+
+        user_data.setdefault(
+            "name",
+            ""
+        )
+
+        user_data.setdefault(
+            "balance",
+            0
+        )
+
+        user_data.setdefault(
+            "referrals",
+            []
+        )
+
+        user_data.setdefault(
+            "referred_by",
+            None
+        )
+
+        user_data.setdefault(
+            "created_at",
+            datetime.now().isoformat()
+        )
+
+        save_data(data)
+
+    return True
+
+
 def get_user(user_id):
     return data["users"].get(
         str(user_id)
@@ -1123,8 +1197,9 @@ async def callback_handler(
             "در یک خط ارسال کنید.\n\n"
             "مثال:\n"
             "123456789 50000\n\n"
-            "یعنی ۵۰٬۰۰۰ DOGS به کاربر "
-            "123456789 اضافه شود.",
+            "حتی اگر کاربر هنوز /start نزده باشد "
+            "هم می‌توانید شارژ کنید.\n\n"
+            "موجودی بعد از /start نیز حفظ می‌شود.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1878,23 +1953,24 @@ async def handle_admin_states(
 
             return True
 
-        target_user = get_user(
-            target_id
-        )
+        # =================================================
+        # FIX:
+        # اگر کاربر /start نزده باشد،
+        # فقط با آیدی عددی ساخته می‌شود.
+        # موجودی از اینجا ذخیره می‌شود.
+        # =================================================
 
-        if not target_user:
+        if not create_user_by_id(
+            target_id
+        ):
 
             await update.message.reply_text(
-                "❌ این کاربر هنوز ربات را "
-                "استارت نکرده است.\n\n"
-                "کاربر ابتدا باید /start "
-                "را برای ربات ارسال کند."
+                "❌ ساخت کاربر انجام نشد."
             )
 
             return True
 
         # =================================================
-        # IMPORTANT:
         # ADD TO EXISTING BALANCE
         # =================================================
 
@@ -1919,10 +1995,8 @@ async def handle_admin_states(
             target_id
         )
 
-        # اطمینان از ذخیره نهایی
         save_data(data)
 
-        # پاک کردن state فقط بعد از موفقیت
         context.user_data.clear()
 
         await update.message.reply_text(
@@ -1933,8 +2007,16 @@ async def handle_admin_states(
             f"💵 موجودی قبلی: "
             f"{old_balance:,} DOGS\n"
             f"💵 موجودی جدید: "
-            f"{new_balance:,} DOGS"
+            f"{new_balance:,} DOGS\n\n"
+            "✅ این موجودی حتی اگر کاربر هنوز "
+            "/start نزده باشد ذخیره شد."
         )
+
+        # =================================================
+        # ارسال پیام به کاربر
+        # اگر کاربر هنوز ربات را استارت نکرده باشد،
+        # تلگرام اجازه ارسال نمی‌دهد؛ ولی موجودی ذخیره است.
+        # =================================================
 
         try:
 
@@ -2011,6 +2093,11 @@ async def handle_admin_states(
             )
 
             return True
+
+        # اطمینان از وجود کاربر
+        create_user_by_id(
+            dep["user_id"]
+        )
 
         success = add_balance(
             dep["user_id"],
