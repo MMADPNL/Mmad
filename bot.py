@@ -22,7 +22,7 @@ from telegram.ext import (
 # تنظیمات
 # =========================================================
 
-BOT_TOKEN = "BOT_TOKEN"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 OWNER_ID = 8552447077
 
