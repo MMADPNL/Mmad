@@ -137,46 +137,28 @@ async def start(
     await update.message.reply_text(
 
         "🤖 به ربات خوش آمدید.\n\n"
-
-        f"👤 {user.first_name}\n"
-
-        f"💰 موجودی شما:\n"
-        f"{balance(user.id):,} DOGS\n\n"
-
-        "یکی از گزینه‌های زیر را انتخاب کنید:",
-
-        reply_markup=main_keyboard(
-            user.id,
-            chat_type
+    await update.message.reply_text(
+        "🎮 بازی ساخته شد\n\n"
+        f"👤 سازنده: {user_display(user.id)}\n\n"
+        f"💰 شرط: {amount:,} DOGS\n\n"
+        "👥 نفر دوم می‌تواند وارد بازی شود.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🎮 ورود به بازی",
+                        callback_data="join_game"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ لغو بازی",
+                        callback_data="cancel_game"
+                    )
+                ]
+            ]
         )
     )
-
-async def game_command(update, context):
-
-    "🎮 بازی ساخته شد\n\n"
-    f"👤 سازنده: {user_display(user.id)}\n\n"
-    f"💰 شرط: {amount:,} DOGS\n\n"
-    "👥 نفر دوم می‌تواند وارد بازی شود.",
-
-    reply_markup=InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "🎮 ورود به بازی",
-                    callback_data="join_game"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "❌ لغو بازی",
-                    callback_data="cancel_game"
-                )
-            ]
-        ]
-    )
-)
-
-
 
 
     
