@@ -1325,23 +1325,14 @@ async def callback_handler(update, context):
 def main():
 
     if not BOT_TOKEN:
-
-        print(
-            "❌ BOT_TOKEN پیدا نشد"
-        )
-
+        print("❌ BOT_TOKEN پیدا نشد")
         return
-
-
 
     app = Application.builder().token(
         BOT_TOKEN
     ).build()
 
-
-
     # START
-
     app.add_handler(
         CommandHandler(
             "start",
@@ -1349,28 +1340,16 @@ def main():
         )
     )
 
-
-
-    # GAME CREATE
-
+    # GAME
     app.add_handler(
         MessageHandler(
-
             filters.TEXT
-            &
-            filters.Regex(
-                r"^بازی\s+\d+$"
-            ),
-
+            & filters.Regex(r"^بازی\s+\d+$"),
             game_command
-
         )
     )
 
-
-
     # GAME BUTTONS
-
     app.add_handler(
         CallbackQueryHandler(
             game_callback,
@@ -1378,10 +1357,7 @@ def main():
         )
     )
 
-
-
     # DEPOSIT ACCEPT / REJECT
-
     app.add_handler(
         CallbackQueryHandler(
             admin_callback,
@@ -1389,60 +1365,27 @@ def main():
         )
     )
 
-
-
-    # ALL BUTTONS
-
-
-
-
-
-    # DEPOSIT PHOTO + TEXT + STATES
-
+    # GENERAL BUTTONS
     app.add_handler(
-        MessageHandler(
-            (
-                filters.TEXT
-                |
-                filters.PHOTO
-            )
-            &
-            ~filters.COMMAND,
-
-            lambda update, context:
-            handle_deposit(update, context)
-            if context.user_data.get("state")
-            in [
-                "deposit_receipt",
-                "deposit_amount"
-            ]
-            else message_handler(update, context)
-
+        CallbackQueryHandler(
+            callback_handler
         )
     )
 
-
-
-    # OWNER COMMANDS
-app.add_handler(
-    CallbackQueryHandler(
-        callback_handler
-    )
-)
-    
-
-
-
-    print(
-        "✅ BOT STARTED"
+    # DEPOSIT / WITHDRAW / SUPPORT
+    app.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.PHOTO)
+            & ~filters.COMMAND,
+            message_handler
+        )
     )
 
-
+    print("✅ BOT STARTED")
 
     app.run_polling(
         drop_pending_updates=True
     )
-
 
 
 # =========================
@@ -1450,5 +1393,4 @@ app.add_handler(
 # =========================
 
 if __name__ == "__main__":
-
     main()
