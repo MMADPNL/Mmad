@@ -28,12 +28,15 @@ OWNER_ID = 8552447077
 
 SUPPORT_USERNAME = "@CyyFr"
 
+ULTRA_ID = "@CyyFr"
+
 DOGS_WALLET = "UQDuzMkT20XQbE4YLy5ZK7-pJzduzLPOoqhzIbOBJy3SpsiY"
 
+MIN_DEPOSIT = 5000
 MIN_WITHDRAW = 10000
-REF_REWARD = 50
 
 DATA_FILE = "bot_data.json"
+
 
 
 # =========================
@@ -41,29 +44,39 @@ DATA_FILE = "bot_data.json"
 # =========================
 
 DEFAULT_DATA = {
+
     "users": {},
+
     "deposits": {},
+
     "withdraws": {},
-    "games": {},
-    "owner": OWNER_ID,
-    "settings": {
-        "bot": True,
-        "group": "",
-        "channel": ""
-    }
+
+    "owner": OWNER_ID
+
 }
+
 
 
 def load_data():
 
     if not os.path.exists(DATA_FILE):
+
         return DEFAULT_DATA
 
+
     try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            DATA_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             return json.load(f)
 
+
     except:
+
         return DEFAULT_DATA
 
 
@@ -87,7 +100,6 @@ def save_data():
             indent=2
         )
 
-
 # =========================
 # USER SYSTEM
 # =========================
@@ -95,6 +107,7 @@ def save_data():
 def create_user(user):
 
     uid = str(user.id)
+
 
     if uid not in data["users"]:
 
@@ -104,8 +117,6 @@ def create_user(user):
             "name": user.first_name or "",
             "username": user.username or "",
             "balance": 0,
-            "refs": [],
-            "ref_by": None,
             "date": datetime.now().isoformat()
 
         }
@@ -128,9 +139,13 @@ def balance(uid):
     user = get_user(uid)
 
     if not user:
+
         return 0
 
-    return int(user.get("balance", 0))
+
+    return int(
+        user.get("balance", 0)
+    )
 
 
 
@@ -158,28 +173,31 @@ def remove_balance(uid, amount):
 
         return True
 
+
     return False
 
 
 
 def is_owner(uid):
 
-    return int(uid) == int(
-        data.get("owner", OWNER_ID)
-        )
-    # =========================
+    return int(uid) == int(OWNER_ID)
+
+
+
+# =========================
 # KEYBOARD
 # =========================
 
 def main_keyboard(uid):
 
-    rows = [
+    buttons = [
 
         [
             InlineKeyboardButton(
                 "💳 واریز",
                 callback_data="deposit"
             ),
+
             InlineKeyboardButton(
                 "💰 برداشت",
                 callback_data="withdraw"
@@ -190,10 +208,6 @@ def main_keyboard(uid):
             InlineKeyboardButton(
                 "👤 پروفایل",
                 callback_data="profile"
-            ),
-            InlineKeyboardButton(
-                "👥 زیرمجموعه",
-                callback_data="ref"
             )
         ],
 
@@ -209,19 +223,19 @@ def main_keyboard(uid):
 
     if is_owner(uid):
 
-        rows.append(
+        buttons.append(
+
             [
                 InlineKeyboardButton(
                     "⚙️ پنل مالک",
                     callback_data="admin"
                 )
             ]
+
         )
 
 
-    return InlineKeyboardMarkup(rows)
-
-
+    return InlineKeyboardMarkup(buttons)
 
 # =========================
 # START
@@ -244,8 +258,11 @@ async def start(update, context):
             user.id
         )
 
-            )
-    # =========================
+    )
+
+
+
+# =========================
 # PROFILE
 # =========================
 
@@ -261,10 +278,10 @@ async def profile(query):
         "👤 پروفایل\n\n"
         f"🆔 آیدی: {uid}\n"
         f"👤 نام: {user['name']}\n"
-        f"💰 موجودی: {balance(uid):,} DOGS\n"
-        f"👥 زیرمجموعه: {len(user['refs'])}",
+        f"💰 موجودی: {balance(uid):,} DOGS",
 
         reply_markup=InlineKeyboardMarkup(
+
             [
                 [
                     InlineKeyboardButton(
@@ -273,33 +290,8 @@ async def profile(query):
                     )
                 ]
             ]
+
         )
-    )
-
-
-
-# =========================
-# REFERRAL
-# =========================
-
-async def referral(query, context):
-
-    uid = query.from_user.id
-
-    bot = await context.bot.get_me()
-
-
-    link = (
-        f"https://t.me/{bot.username}"
-        f"?start={uid}"
-    )
-
-
-    await query.edit_message_text(
-
-        "👥 زیرمجموعه گیری\n\n"
-        f"🔗 لینک شما:\n{link}\n\n"
-        f"🎁 پاداش هر دعوت: {REF_REWARD} DOGS"
 
     )
 
@@ -316,14 +308,29 @@ async def deposit_menu(query):
         "💳 روش واریز را انتخاب کنید:",
 
         reply_markup=InlineKeyboardMarkup(
+
             [
+
                 [
+
                     InlineKeyboardButton(
-                        "💎 انتقال DOGS",
+                        "💎 اولترا",
+                        callback_data="ultra"
+                    )
+
+                ],
+
+                [
+
+                    InlineKeyboardButton(
+                        "💎 صرافی",
                         callback_data="exchange"
                     )
+
                 ]
+
             ]
+
         )
 
     )
@@ -331,7 +338,29 @@ async def deposit_menu(query):
 
 
 # =========================
-# DEPOSIT ADDRESS
+# ULTRA DEPOSIT
+# =========================
+
+async def ultra(query, context):
+
+    context.user_data["state"] = "deposit"
+
+
+    await query.edit_message_text(
+
+        "💎 اولترا\n\n"
+        "DOGS را به این آیدی ارسال کنید:\n\n"
+        f"{ULTRA_ID}\n\n"
+        "بعد از ارسال، شات یا پیام رسید خود را بفرستید.\n\n"
+        "توسط مالک بررسی و تایید می‌شود.\n\n"
+        f"حداقل واریز: {MIN_DEPOSIT} DOGS"
+
+    )
+
+
+
+# =========================
+# EXCHANGE DEPOSIT
 # =========================
 
 async def exchange(query, context):
@@ -341,13 +370,15 @@ async def exchange(query, context):
 
     await query.edit_message_text(
 
-        "💎 واریز DOGS\n\n"
-        "DOGS را به آدرس زیر ارسال کنید:\n\n"
+        "💎 صرافی\n\n"
+        "DOGS را به این ولت ارسال کنید:\n\n"
         f"{DOGS_WALLET}\n\n"
-        "بعد از انتقال، رسید یا هش تراکنش را ارسال کنید.\n"
-        "مالک بررسی می‌کند."
+        "بعد از ارسال، شات یا لینک تراکنش خود را بفرستید.\n\n"
+        "توسط مالک بررسی و تایید می‌شود.\n\n"
+        f"حداقل واریز: {MIN_DEPOSIT} DOGS"
 
-            )
+    )
+
 # =========================
 # WITHDRAW
 # =========================
@@ -361,7 +392,7 @@ async def withdraw_menu(query, context):
 
         "💰 برداشت\n\n"
         f"حداقل برداشت: {MIN_WITHDRAW:,} DOGS\n\n"
-        "تعداد DOGS را ارسال کنید."
+        "مقدار برداشت را به صورت عدد ارسال کنید."
 
     )
 
@@ -432,6 +463,15 @@ async def callback_handler(update, context):
 
 
 
+    elif action == "ultra":
+
+        await ultra(
+            query,
+            context
+        )
+
+
+
     elif action == "exchange":
 
         await exchange(
@@ -457,60 +497,7 @@ async def callback_handler(update, context):
             context
         )
 
-
-
-    elif action == "ref":
-
-        await referral(
-            query,
-            context
-        )
-
-
-
-    elif action == "admin":
-
-        if not is_owner(user.id):
-
-            await query.answer(
-                "دسترسی ندارید",
-                show_alert=True
-            )
-
-            return
-
-
-        await query.edit_message_text(
-
-            "⚙️ پنل مالک\n\n"
-            "مدیریت ربات",
-
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "📊 آمار",
-                            callback_data="stats"
-                        )
-                    ]
-                ]
-            )
-
-        )
-
-
-
-    elif action == "stats":
-
-        if is_owner(user.id):
-
-            await query.edit_message_text(
-
-                "📊 آمار\n\n"
-                f"👤 کاربران: {len(data['users'])}"
-
-)
-            # =========================
+# =========================
 # MESSAGE HANDLER
 # =========================
 
@@ -528,7 +515,7 @@ async def message_handler(update, context):
 
 
     # =====================
-    # WITHDRAW REQUEST
+    # WITHDRAW
     # =====================
 
     if state == "withdraw":
@@ -542,7 +529,6 @@ async def message_handler(update, context):
             await update.message.reply_text(
                 "❌ فقط عدد ارسال کنید"
             )
-
             return
 
 
@@ -552,7 +538,6 @@ async def message_handler(update, context):
             await update.message.reply_text(
                 f"❌ حداقل برداشت {MIN_WITHDRAW:,} DOGS است"
             )
-
             return
 
 
@@ -562,7 +547,6 @@ async def message_handler(update, context):
             await update.message.reply_text(
                 "❌ موجودی کافی نیست"
             )
-
             return
 
 
@@ -597,7 +581,7 @@ async def message_handler(update, context):
 
             text=(
 
-                "💰 درخواست برداشت\n\n"
+                "💰 برداشت جدید\n\n"
                 f"👤 کاربر: {user.id}\n"
                 f"💰 مقدار: {amount:,} DOGS"
 
@@ -611,7 +595,7 @@ async def message_handler(update, context):
 
 
     # =====================
-    # DEPOSIT RECEIPT
+    # DEPOSIT
     # =====================
 
     if state == "deposit":
@@ -619,7 +603,7 @@ async def message_handler(update, context):
 
         data["deposits"][str(user.id)] = {
 
-            "text": text,
+            "receipt": text,
             "status": "pending"
 
         }
@@ -632,7 +616,7 @@ async def message_handler(update, context):
 
 
         await update.message.reply_text(
-            "✅ رسید ارسال شد، منتظر تایید مالک باشید."
+            "✅ رسید ارسال شد\nمنتظر تایید مالک باشید."
         )
 
 
@@ -643,7 +627,7 @@ async def message_handler(update, context):
             text=(
 
                 "💳 واریز جدید\n\n"
-                f"👤 کاربر: {user.id}\n"
+                f"👤 کاربر: {user.id}\n\n"
                 f"📝 رسید:\n{text}"
 
             ),
@@ -651,17 +635,21 @@ async def message_handler(update, context):
             reply_markup=InlineKeyboardMarkup(
 
                 [
+
                     [
+
                         InlineKeyboardButton(
                             "✅ تایید",
-                            callback_data=f"ok_d_{user.id}"
+                            callback_data=f"ok_dep_{user.id}"
                         ),
 
                         InlineKeyboardButton(
                             "❌ رد",
-                            callback_data=f"no_d_{user.id}"
+                            callback_data=f"no_dep_{user.id}"
                         )
+
                     ]
+
                 ]
 
             )
@@ -678,7 +666,6 @@ async def message_handler(update, context):
     # =====================
 
     if state == "support":
-
 
         await context.bot.send_message(
 
@@ -699,13 +686,13 @@ async def message_handler(update, context):
 
 
         await update.message.reply_text(
-            "✅ پیام ارسال شد"
+            "✅ ارسال شد"
         )
 
-
         return
-        # =========================
-# ADMIN CALLBACKS
+
+# =========================
+# ADMIN CALLBACK
 # =========================
 
 async def admin_callback(update, context):
@@ -721,7 +708,7 @@ async def admin_callback(update, context):
     if not is_owner(user.id):
 
         await query.answer(
-            "دسترسی ندارید",
+            "❌ دسترسی ندارید",
             show_alert=True
         )
 
@@ -733,9 +720,11 @@ async def admin_callback(update, context):
 
 
 
-    # تایید واریز
+    # =====================
+    # ACCEPT DEPOSIT
+    # =====================
 
-    if action.startswith("ok_d_"):
+    if action.startswith("ok_dep_"):
 
         uid = int(
             action.split("_")[2]
@@ -744,26 +733,39 @@ async def admin_callback(update, context):
 
         if str(uid) in data["deposits"]:
 
+
             data["deposits"][str(uid)]["status"] = "accepted"
 
             save_data()
 
 
 
-        await query.edit_message_text(
-            "✅ واریز تایید شد\n\n"
-            f"👤 کاربر: {uid}\n\n"
-            "برای اضافه کردن موجودی از دستور شارژ استفاده کنید."
-        )
+            # اضافه شدن موجودی
+
+            add_balance(
+                uid,
+                MIN_DEPOSIT
+            )
+
+
+            await query.edit_message_text(
+
+                "✅ واریز تایید شد\n\n"
+                f"👤 کاربر: {uid}\n"
+                f"💰 اضافه شد: {MIN_DEPOSIT:,} DOGS"
+
+            )
 
 
         return
 
 
 
-    # رد واریز
+    # =====================
+    # REJECT DEPOSIT
+    # =====================
 
-    if action.startswith("no_d_"):
+    if action.startswith("no_dep_"):
 
         uid = int(
             action.split("_")[2]
@@ -779,8 +781,10 @@ async def admin_callback(update, context):
 
 
         await query.edit_message_text(
+
             "❌ واریز رد شد\n\n"
             f"👤 کاربر: {uid}"
+
         )
 
 
@@ -807,10 +811,8 @@ async def owner_commands(update, context):
 
 
 
-    # مثال:
-    # شارژ 123456 5000
-
     if text.startswith("شارژ"):
+
 
         try:
 
@@ -831,17 +833,14 @@ async def owner_commands(update, context):
 
 
 
-        create_user(
-            type(
-                "User",
-                (),
-                {
-                    "id":uid,
-                    "first_name":"",
-                    "username":""
-                }
+        if not get_user(uid):
+
+            await update.message.reply_text(
+                "❌ کاربر پیدا نشد"
             )
-        )
+
+            return
+
 
 
         add_balance(
@@ -852,14 +851,221 @@ async def owner_commands(update, context):
 
         await update.message.reply_text(
 
-            "✅ موجودی اضافه شد\n\n"
+            "✅ شارژ انجام شد\n\n"
             f"👤 کاربر: {uid}\n"
             f"💰 مقدار: {amount:,} DOGS"
 
         )
 
+# =========================
+# GAME SYSTEM
+# =========================
+
+MIN_GAME = 500
+MAX_GAME = 20000
+GAME_FEE = 100
+
+ACTIVE_GAMES = {}
+
+
+
+async def game_command(update, context):
+
+    try:
+
+        amount = int(
+            update.message.text.split()[1]
+        )
+
+    except:
+
+        await update.message.reply_text(
+            "❌ مثال:\nبازی 500"
+        )
 
         return
+
+
+
+    if amount < MIN_GAME:
+
+        await update.message.reply_text(
+            f"❌ حداقل بازی {MIN_GAME} DOGS است"
+        )
+
+        return
+
+
+
+    if amount > MAX_GAME:
+
+        await update.message.reply_text(
+            f"❌ حداکثر بازی {MAX_GAME} DOGS است"
+        )
+
+        return
+
+
+
+    user = update.effective_user
+
+    chat_id = update.effective_chat.id
+
+
+
+    if balance(user.id) < amount:
+
+        await update.message.reply_text(
+            "❌ موجودی کافی نیست"
+        )
+
+        return
+
+
+
+    if chat_id in ACTIVE_GAMES:
+
+        await update.message.reply_text(
+            "❌ یک بازی در حال انتظار است"
+        )
+
+        return
+
+
+
+    remove_balance(
+        user.id,
+        amount
+    )
+
+
+    ACTIVE_GAMES[chat_id] = {
+
+        "creator": user.id,
+        "amount": amount
+
+    }
+
+
+
+    await update.message.reply_text(
+
+        "🎮 بازی ساخته شد\n\n"
+        f"👤 سازنده: {user.first_name}\n"
+        f"💰 شرط: {amount:,} DOGS\n\n"
+        "یک نفر برای ورود دکمه زیر را بزند.",
+
+        reply_markup=InlineKeyboardMarkup(
+
+            [
+
+                [
+
+                    InlineKeyboardButton(
+
+                        "🎮 ورود به بازی",
+
+                        callback_data="join_game"
+
+                    )
+
+                ]
+
+            ]
+
+        )
+
+    )
+
+
+
+async def game_callback(update, context):
+
+    query = update.callback_query
+
+    await query.answer()
+
+
+    chat_id = query.message.chat.id
+
+    user = query.from_user
+
+
+
+    if chat_id not in ACTIVE_GAMES:
+
+        await query.answer(
+            "❌ بازی پیدا نشد",
+            show_alert=True
+        )
+
+        return
+
+
+
+    game = ACTIVE_GAMES[chat_id]
+
+
+    if user.id == game["creator"]:
+
+        await query.answer(
+            "❌ خودت نمی‌توانی وارد شوی",
+            show_alert=True
+        )
+
+        return
+
+
+
+    if balance(user.id) < game["amount"]:
+
+        await query.answer(
+            "❌ موجودی کافی نیست",
+            show_alert=True
+        )
+
+        return
+
+
+
+    remove_balance(
+        user.id,
+        game["amount"]
+    )
+
+
+    total = game["amount"] * 2
+
+    prize = total - GAME_FEE
+
+
+
+    winner = user.id
+
+
+    add_balance(
+        winner,
+        prize
+    )
+
+
+    add_balance(
+        OWNER_ID,
+        GAME_FEE
+    )
+
+
+    await query.edit_message_text(
+
+        "🎮 نتیجه بازی\n\n"
+        f"🏆 برنده: {winner}\n"
+        f"💰 جایزه: {prize:,} DOGS\n\n"
+        f"👑 کارمزد مالک: {GAME_FEE} DOGS"
+
+    )
+
+
+    del ACTIVE_GAMES[chat_id]
 
 # =========================
 # MAIN
@@ -873,10 +1079,30 @@ def main():
 
 
 
+    # start
+
     app.add_handler(
         CommandHandler(
             "start",
             start
+        )
+    )
+
+
+    # بازی
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^بازی\s+\d+$"),
+            game_command
+        )
+    )
+
+
+    app.add_handler(
+        CallbackQueryHandler(
+            game_callback,
+            pattern="^join_game$"
         )
     )
 
@@ -886,12 +1112,12 @@ def main():
     app.add_handler(
         CallbackQueryHandler(
             admin_callback,
-            pattern="^(ok_d_|no_d_)"
+            pattern="^(ok_dep_|no_dep_)"
         )
     )
 
 
-    # منوی دکمه ها
+    # دکمه های ربات
 
     app.add_handler(
         CallbackQueryHandler(
@@ -900,7 +1126,7 @@ def main():
     )
 
 
-    # دستورات مالک مثل شارژ
+    # دستور شارژ مالک
 
     app.add_handler(
         MessageHandler(
@@ -910,7 +1136,7 @@ def main():
     )
 
 
-    # پیام های عادی
+    # پیام های کاربر
 
     app.add_handler(
         MessageHandler(
@@ -918,6 +1144,7 @@ def main():
             message_handler
         )
     )
+
 
 
     print(
