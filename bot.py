@@ -570,28 +570,177 @@ async def callback_handler(update, context):
 
 
     # =====================
-    # DEPOSIT
+# DEPOSIT
+# =====================
+
+if state == "deposit":
+
+    receipt = text
+
+    if update.message.photo:
+
+        receipt = (
+            "📸 عکس رسید ارسال شد\n"
+            f"🆔 کاربر: {user.id}\n"
+            f"📝 توضیحات: {text if text else 'بدون توضیح'}"
+        )
+
+    elif not text:
+
+        await update.message.reply_text(
+            "❌ لطفاً عکس رسید، لینک تراکنش یا متن رسید را ارسال کنید."
+        )
+
+        return
+
+
+    uid = str(user.id)
+
+    data["deposits"][uid] = {
+
+        "receipt": receipt,
+        "status": "pending",
+        "time": datetime.now().isoformat()
+
+    }
+
+    save_data()
+
+    context.user_data.clear()
+
+
+    await update.message.reply_text(
+        "✅ رسید شما دریافت شد.\n\n"
+        "⏳ توسط مالک بررسی و تایید می‌شود."
+    )
+
+
+    # =====================
+    # SEND TO OWNER
     # =====================
 
-    if action == "deposit":
+    try:
 
-        await deposit_menu(query)
+        await context.bot.send_message(
 
-        return
+            chat_id=OWNER_ID,
+
+            text=(
+                "💳 واریز جدید\n\n"
+                f"👤 کاربر: {user.id}\n"
+                f"👤 نام: {user.first_name or '-'}\n\n"
+                f"📝 رسید:\n{receipt}"
+            ),
+
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✅ تایید",
+                            callback_data=f"ok_dep_{user.id}"
+                        ),
+                        InlineKeyboardButton(
+                            "❌ رد",
+                            callback_data=f"no_dep_{user.id}"
+                        )
+                    ]
+                ]
+            )
+
+        )
 
 
-    if action == "ultra":
+        # اگر عکس بود، خود عکس را هم برای مالک بفرست
 
-        await ultra(query, context)
+        if update.message.photo:
 
-        return
+            await context.bot.send_photo(
+
+                chat_id=OWNER_ID,
+
+                photo=update.message.photo[-1].file_id,
+
+                caption=(
+                    f"📸 عکس رسید واریز\n"
+                    f"👤 کاربر: {user.id}\n"
+                    f"📝 {text if text else 'بدون توضیح'}"
+                )
+
+            )
 
 
-    if action == "exchange":
+    except Exception as e:
 
-        await exchange(query, context)
+        print(
+            f"Deposit owner notification error: {e}"
+        )
 
-        return
+
+    return
+
+
+    # =====================
+    # SEND TO OWNER
+    # =====================
+
+    try:
+
+        await context.bot.send_message(
+
+            chat_id=OWNER_ID,
+
+            text=(
+                "💳 واریز جدید\n\n"
+                f"👤 کاربر: {user.id}\n"
+                f"👤 نام: {user.first_name or '-'}\n\n"
+                f"📝 رسید:\n{receipt}"
+            ),
+
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "✅ تایید",
+                            callback_data=f"ok_dep_{user.id}"
+                        ),
+                        InlineKeyboardButton(
+                            "❌ رد",
+                            callback_data=f"no_dep_{user.id}"
+                        )
+                    ]
+                ]
+            )
+
+        )
+
+
+        # اگر عکس بود، خود عکس را هم برای مالک بفرست
+
+        if update.message.photo:
+
+            await context.bot.send_photo(
+
+                chat_id=OWNER_ID,
+
+                photo=update.message.photo[-1].file_id,
+
+                caption=(
+                    f"📸 عکس رسید واریز\n"
+                    f"👤 کاربر: {user.id}\n"
+                    f"📝 {text if text else 'بدون توضیح'}"
+                )
+
+            )
+
+
+    except Exception as e:
+
+        print(
+            f"Deposit owner notification error: {e}"
+        )
+
+
+    return
 
 
     # =====================
@@ -2396,10 +2545,10 @@ def main():
     # =====================
 
     app.add_handler(
-        MessageHandler(
-            filters.TEXT,
-            message_handler
-        )
+    MessageHandler(
+        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+        message_handler
+    )
     )
 
 
