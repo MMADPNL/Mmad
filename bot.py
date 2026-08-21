@@ -166,19 +166,11 @@ reply_markup=InlineKeyboardMarkup(
             )
         ]
     ]
-)
 
 
 
 
-
-        if update.effective_chat.type == "private":
-
-        await update.message.reply_text(
-            "❌ بازی فقط داخل گروه قابل انجام است."
-        )
-
-        return
+    
 
 app.add_handler(
     CommandHandler(
