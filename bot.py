@@ -151,21 +151,30 @@ async def start(
         )
     )
 
-reply_markup=InlineKeyboardMarkup(
-    [
+await update.message.reply_text(
+
+    "🎮 بازی ساخته شد\n\n"
+    f"👤 سازنده: {user_display(user.id)}\n\n"
+    f"💰 شرط: {amount:,} DOGS\n\n"
+    "👥 نفر دوم می‌تواند وارد بازی شود.",
+
+    reply_markup=InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "🎮 ورود به بازی",
-                callback_data="join_game"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ لغو بازی",
-                callback_data="cancel_game"
-            )
+            [
+                InlineKeyboardButton(
+                    "🎮 ورود به بازی",
+                    callback_data="join_game"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ لغو بازی",
+                    callback_data="cancel_game"
+                )
+            ]
         ]
-    ]
+    )
+)
 
 
 
