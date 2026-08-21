@@ -2746,3 +2746,214 @@ def main():
 if __name__ == "__main__":
 
     main()
+
+# =========================
+# BUTTON CALLBACK
+# =========================
+
+async def callback_handler(update, context):
+
+    query = update.callback_query
+
+    if not query:
+        return
+
+    user = query.from_user
+
+    if not user:
+        return
+
+    try:
+
+        await query.answer()
+
+        create_user(user)
+
+        action = query.data
+
+        print(
+            f"🔘 BUTTON: {action} | USER: {user.id}"
+        )
+
+
+        # =========================
+        # HOME
+        # =========================
+
+        if action == "home":
+
+            await query.edit_message_text(
+
+                "🤖 منوی اصلی\n\n"
+                f"💰 موجودی شما:\n"
+                f"{balance(user.id):,} DOGS",
+
+                reply_markup=main_keyboard(
+                    user.id
+                )
+            )
+
+            return
+
+
+        # =========================
+        # PROFILE
+        # =========================
+
+        if action == "profile":
+
+            await profile(query)
+
+            return
+
+
+        # =========================
+        # DEPOSIT
+        # =========================
+
+        if action == "deposit":
+
+            await deposit_menu(query)
+
+            return
+
+
+        # =========================
+        # WITHDRAW
+        # =========================
+
+        if action == "withdraw":
+
+            await withdraw_menu(
+                query,
+                context
+            )
+
+            return
+
+
+        # =========================
+        # SUPPORT
+        # =========================
+
+        if action == "support":
+
+            await support(
+                query,
+                context
+            )
+
+            return
+
+
+        # =========================
+        # GAME INFO
+        # =========================
+
+        if action == "game_info":
+
+            await game_info(query)
+
+            return
+
+
+        # =========================
+        # ULTRA
+        # =========================
+
+        if action == "ultra":
+
+            await ultra(
+                query,
+                context
+            )
+
+            return
+
+
+        # =========================
+        # EXCHANGE
+        # =========================
+
+        if action == "exchange":
+
+            await exchange(
+                query,
+                context
+            )
+
+            return
+
+
+        # =========================
+        # ADMIN
+        # =========================
+
+        if action == "admin":
+
+            if not is_owner(user.id):
+
+                await query.answer(
+                    "❌ دسترسی ندارید.",
+                    show_alert=True
+                )
+
+                return
+
+            await admin_panel(query)
+
+            return
+
+
+        # =========================
+        # ADMIN TOGGLE
+        # =========================
+
+        if action == "admin_toggle":
+
+            await admin_toggle(query)
+
+            return
+
+
+        # =========================
+        # ADMIN STATS
+        # =========================
+
+        if action == "admin_stats":
+
+            await admin_stats(query)
+
+            return
+
+
+        # =========================
+        # UNKNOWN BUTTON
+        # =========================
+
+        await query.answer(
+            "❌ این گزینه پیدا نشد.",
+            show_alert=True
+        )
+
+
+    except Exception as e:
+
+        print(
+            "❌ CALLBACK ERROR:"
+        )
+
+        print(
+            repr(e)
+        )
+
+        try:
+
+            await query.answer(
+                "❌ خطایی رخ داد. دوباره تلاش کنید.",
+                show_alert=True
+            )
+
+        except:
+
+            pass
