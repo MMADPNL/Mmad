@@ -1298,11 +1298,7 @@ def main():
 
     # ALL BUTTONS
 
-    app.add_handler(
-        CallbackQueryHandler(
-            callback_handler
-        )
-    )
+
 
 
 
