@@ -1685,10 +1685,10 @@ def main():
 
     # پنل مالک
     app.add_handler(
-        CallbackQueryHandler(
-            admin_settings_callback,
-            pattern=r"^admin_"
-        )
+    CallbackQueryHandler(
+        admin_callback,
+        pattern=r"^admin_|^ok_dep_|^no_dep_"
+    )
     )
 
 
