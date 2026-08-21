@@ -1633,99 +1633,78 @@ async def game_callback(update, context):
         return
 
 # =========================
-# MAIN
+# MAIN HANDLERS
 # =========================
 
-def main():
-
-    if not BOT_TOKEN:
-        print("❌ BOT_TOKEN پیدا نشد")
-        return
-
-
-    app = Application.builder().token(
-        BOT_TOKEN
-    ).build()
-
-
-    # start
-    app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+# /start
+app.add_handler(
+    CommandHandler(
+        "start",
+        start
     )
+)
 
-
-    # بازی
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.Regex(r"^بازی\s+\d+$"),
-            game_command
-        )
+# بازی
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & filters.Regex(r"^بازی\s+\d+$"),
+        game_command
     )
+)
 
-
-    app.add_handler(
-        CallbackQueryHandler(
-            game_callback,
-            pattern=r"^(join_game|cancel_game)$"
-        )
+# دکمه بازی
+app.add_handler(
+    CallbackQueryHandler(
+        game_callback,
+        pattern=r"^(join_game|cancel_game)$"
     )
+)
 
-
-    # تایید و رد واریز مالک
-    app.add_handler(
-        CallbackQueryHandler(
-            admin_callback,
-            pattern=r"^(ok_dep_|no_dep_)"
-        )
-    )
-
-
-    # پنل مالک
-    app.add_handler(
+# تایید / رد واریز مالک
+app.add_handler(
     CallbackQueryHandler(
         admin_callback,
-        pattern=r"^admin_|^ok_dep_|^no_dep_"
+        pattern=r"^(ok_dep_|no_dep_)"
     )
+)
+
+# پنل مالک
+app.add_handler(
+    CallbackQueryHandler(
+        admin_callback,
+        pattern=r"^admin_"
     )
+)
 
-
-    # دکمه های اصلی
-    app.add_handler(
-        CallbackQueryHandler(
-            callback_handler
-        )
+# پیام‌های کاربر
+# متن + عکس رسید
+app.add_handler(
+    MessageHandler(
+        (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
+        message_handler
     )
+)
 
-
-    # دستورهای مالک
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & filters.User(
-                user_id=OWNER_ID
-            ),
-            owner_commands
-        )
+# دستورهای مالک
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & filters.User(user_id=OWNER_ID),
+        owner_commands
     )
+)
 
-
-    # پیام و عکس کاربران
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.PHOTO) & ~filters.COMMAND,
-            message_handler
-        )
+# دکمه‌های عمومی
+app.add_handler(
+    CallbackQueryHandler(
+        callback_handler
     )
+)
 
+print("✅ BOT STARTED")
 
-    print("✅ BOT STARTED")
-
-
-    app.run_polling(
-        drop_pending_updates=True
-    )
+app.run_polling(
+    drop_pending_updates=True
+)
 
 
 # =========================
