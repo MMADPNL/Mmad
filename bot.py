@@ -1048,6 +1048,309 @@ async def go_home(
     )
 
 # =========================
+# GAME SYSTEM
+# =========================
+
+ACTIVE_GAMES = {}
+
+
+def user_display(uid):
+
+    user = get_user(uid)
+
+    if not user:
+        return str(uid)
+
+    username = user.get("username", "")
+
+    if username:
+        return f"@{username}"
+
+    name = user.get("name", "")
+
+    if name:
+        return name
+
+    return str(uid)
+
+
+# =========================
+# CREATE GAME
+# =========================
+
+async def game_command(update, context):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    create_user(user)
+
+    try:
+        parts = update.message.text.strip().split()
+
+        if len(parts) != 2:
+            raise ValueError
+
+        amount = int(parts[1])
+
+    except (ValueError, IndexError):
+
+        await update.message.reply_text(
+            "❌ فرمت اشتباه است.\n\n"
+            "مثال:\n"
+            "بازی 500"
+        )
+
+        return
+
+    if amount < MIN_GAME:
+
+        await update.message.reply_text(
+            f"❌ حداقل شرط بازی "
+            f"{MIN_GAME:,} DOGS است."
+        )
+
+        return
+
+    if amount > MAX_GAME:
+
+        await update.message.reply_text(
+            f"❌ حداکثر شرط بازی "
+            f"{MAX_GAME:,} DOGS است."
+        )
+
+        return
+
+    chat_id = update.effective_chat.id
+
+    if chat_id in ACTIVE_GAMES:
+
+        await update.message.reply_text(
+            "❌ در این گپ یک بازی فعال است."
+        )
+
+        return
+
+    if balance(user.id) < amount:
+
+        await update.message.reply_text(
+            "❌ موجودی کافی نیست.\n\n"
+            f"💰 موجودی شما: "
+            f"{balance(user.id):,} DOGS"
+        )
+
+        return
+
+    # کسر شرط سازنده
+    if not remove_balance(user.id, amount):
+
+        await update.message.reply_text(
+            "❌ خطا در کسر موجودی."
+        )
+
+        return
+
+    ACTIVE_GAMES[chat_id] = {
+        "creator": user.id,
+        "amount": amount,
+        "created_at": datetime.now().isoformat()
+    }
+
+    await update.message.reply_text(
+
+        "🎮 بازی ساخته شد\n\n"
+
+        f"👤 سازنده: {user_display(user.id)}\n\n"
+
+        f"💰 شرط: {amount:,} DOGS\n\n"
+
+        "👥 نفر دوم می‌تواند وارد بازی شود.",
+
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "🎮 ورود به بازی",
+                        callback_data="join_game"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "❌ لغو بازی",
+                        callback_data="cancel_game"
+                    )
+                ]
+            ]
+        )
+    )
+
+
+# =========================
+# GAME CALLBACK
+# =========================
+
+async def game_callback(update, context):
+
+    query = update.callback_query
+
+    try:
+        await query.answer()
+    except:
+        pass
+
+    user = query.from_user
+
+    if not user:
+        return
+
+    chat_id = query.message.chat.id
+
+    if chat_id not in ACTIVE_GAMES:
+
+        await query.answer(
+            "❌ این بازی دیگر فعال نیست.",
+            show_alert=True
+        )
+
+        return
+
+    game = ACTIVE_GAMES[chat_id]
+
+    # =========================
+    # CANCEL
+    # =========================
+
+    if query.data == "cancel_game":
+
+        if user.id != game["creator"]:
+
+            await query.answer(
+                "❌ فقط سازنده می‌تواند بازی را لغو کند.",
+                show_alert=True
+            )
+
+            return
+
+        add_balance(
+            user.id,
+            game["amount"]
+        )
+
+        del ACTIVE_GAMES[chat_id]
+
+        await query.edit_message_text(
+
+            "❌ بازی لغو شد.\n\n"
+
+            f"💰 مبلغ "
+            f"{game['amount']:,} DOGS "
+            "به سازنده برگشت داده شد."
+        )
+
+        return
+
+    # =========================
+    # JOIN
+    # =========================
+
+    if query.data == "join_game":
+
+        if user.id == game["creator"]:
+
+            await query.answer(
+                "❌ نمی‌توانید وارد بازی خودتان شوید.",
+                show_alert=True
+            )
+
+            return
+
+        create_user(user)
+
+        amount = game["amount"]
+
+        if balance(user.id) < amount:
+
+            await query.answer(
+                "❌ موجودی کافی نیست.",
+                show_alert=True
+            )
+
+            return
+
+        if not remove_balance(
+            user.id,
+            amount
+        ):
+
+            await query.answer(
+                "❌ خطا در کسر موجودی.",
+                show_alert=True
+            )
+
+            return
+
+        # انتخاب برنده
+        winner = random.choice(
+            [
+                game["creator"],
+                user.id
+            ]
+        )
+
+        if winner == game["creator"]:
+            loser = user.id
+        else:
+            loser = game["creator"]
+
+        total_pot = amount * 2
+
+        prize = total_pot - GAME_FEE
+
+        # جایزه
+        add_balance(
+            winner,
+            prize
+        )
+
+        # کارمزد مالک
+        if not get_user(OWNER_ID):
+
+            data["users"][str(OWNER_ID)] = {
+                "id": OWNER_ID,
+                "name": "OWNER",
+                "username": "",
+                "balance": 0,
+                "date": datetime.now().isoformat()
+            }
+
+            save_data()
+
+        add_balance(
+            OWNER_ID,
+            GAME_FEE
+        )
+
+        del ACTIVE_GAMES[chat_id]
+
+        await query.edit_message_text(
+
+            "🎮 نتیجه بازی\n\n"
+
+            f"🏆 برنده: {user_display(winner)}\n\n"
+
+            f"💰 جایزه: {prize:,} DOGS\n\n"
+
+            f"😢 بازنده: {user_display(loser)}\n\n"
+
+            f"👑 کارمزد مالک: {GAME_FEE:,} DOGS"
+        )
+
+        return
+
+
+# =========================
 # MAIN
 # =========================
 
