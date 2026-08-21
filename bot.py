@@ -1224,6 +1224,101 @@ async def game_callback(update, context):
         return
 
 # =========================
+# BUTTON CALLBACK
+# =========================
+
+async def callback_handler(update, context):
+
+    query = update.callback_query
+
+    try:
+        await query.answer()
+    except:
+        pass
+
+
+    user = query.from_user
+
+    create_user(user)
+
+    action = query.data
+
+
+    if action == "home":
+
+        await query.edit_message_text(
+            "🤖 منوی اصلی\n\n"
+            f"💰 موجودی: {balance(user.id):,} DOGS",
+            reply_markup=main_keyboard(user.id)
+        )
+
+        return
+
+
+    if action == "profile":
+
+        await profile(query)
+
+        return
+
+
+    if action == "deposit":
+
+        await deposit_menu(query)
+
+        return
+
+
+    if action == "withdraw":
+
+        await withdraw_menu(query, context)
+
+        return
+
+
+    if action == "support":
+
+        await support(query, context)
+
+        return
+
+
+    if action == "game_info":
+
+        await game_info(query)
+
+        return
+
+
+    if action == "ultra":
+
+        await ultra(query, context)
+
+        return
+
+
+    if action == "exchange":
+
+        await exchange(query, context)
+
+        return
+
+
+    if action == "admin":
+
+        if not is_owner(user.id):
+            return
+
+        await query.edit_message_text(
+            "⚙️ پنل مالک",
+            reply_markup=admin_keyboard()
+        )
+
+        return
+
+
+
+# =========================
 # MAIN
 # =========================
 
@@ -1329,7 +1424,11 @@ def main():
 
 
     # OWNER COMMANDS
-
+app.add_handler(
+    CallbackQueryHandler(
+        callback_handler
+    )
+)
     
 
 
