@@ -16,23 +16,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Show files
-        run: |
-          pwd
-          ls -la
-          echo "----- requirements.txt -----"
-          cat requirements.txt
-
-      - name: Install library
+      - name: Install Telegram Library
         run: |
           python -m pip install --upgrade pip
-          python -m pip install python-telegram-bot==22.5
+          python -m pip install python-telegram-bot
 
-      - name: Test library
+      - name: Verify Installation
         run: |
-          python -c "import telegram; print('Telegram library OK')"
+          python -c "import telegram; print(telegram.__version__)"
 
-      - name: Run bot
+      - name: Run Bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
         run: |
