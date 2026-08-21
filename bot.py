@@ -1330,19 +1330,7 @@ def main():
 
     # OWNER COMMANDS
 
-    app.add_handler(
-        MessageHandler(
-
-            filters.TEXT
-            &
-            filters.User(
-                user_id=OWNER_ID
-            ),
-
-            owner_commands
-
-        )
-    )
+    
 
 
 
