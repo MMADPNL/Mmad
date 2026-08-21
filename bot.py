@@ -772,17 +772,26 @@ async def message_handler(update,context):
 
 
         await context.bot.send_message(
-
-            chat_id=OWNER_ID,
-
-            text=(
-
-                "💳 واریز جدید\n\n"
-                f"👤 کاربر: {user.id}\n\n"
-                f"{text}"
-
-            )
-
+    chat_id=OWNER_ID,
+    text=(
+        "💰 درخواست برداشت\n\n"
+        f"👤 کاربر: {user.id}\n"
+        f"💰 مقدار: {amount:,} DOGS"
+    ),
+    reply_markup=InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ تایید برداشت",
+                    callback_data=f"ok_w_{user.id}_{amount}"
+                ),
+                InlineKeyboardButton(
+                    "❌ رد برداشت",
+                    callback_data=f"no_w_{user.id}_{amount}"
+                )
+            ]
+        ]
+    )
         )
 
 
