@@ -8,21 +8,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install Telegram
-        run: python -m pip install python-telegram-bot==22.5
+      - name: Show files
+        run: |
+          pwd
+          ls -la
+          echo "----- requirements.txt -----"
+          cat requirements.txt
 
-      - name: Check Telegram
-        run: python -c "import telegram; print(telegram.__version__)"
+      - name: Install library
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install python-telegram-bot==22.5
 
-      - name: Start Bot
+      - name: Test library
+        run: |
+          python -c "import telegram; print('Telegram library OK')"
+
+      - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-        run: python bot.py
+        run: |
+          python bot.py
