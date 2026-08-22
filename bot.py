@@ -1970,19 +1970,59 @@ async def support_receive(update, context):
 
 async def admin_panel(update, context):
 
-
     if not is_owner(update.effective_user.id):
 
         return
 
 
+    keyboard = [
+
+        [
+
+            InlineKeyboardButton(
+                "📊 آمار کاربران",
+                callback_data="stats"
+            )
+
+        ],
+
+        [
+
+            InlineKeyboardButton(
+                "💰 اضافه کردن DOGS زیرمجموعه",
+                callback_data="add_ref_dogs"
+            )
+
+        ],
+
+        [
+
+            InlineKeyboardButton(
+                "🔴 روشن / خاموش",
+                callback_data="toggle_bot"
+            )
+
+        ],
+
+        [
+
+            InlineKeyboardButton(
+                "👑 انتقال مالکیت",
+                callback_data="owner_change"
+            )
+
+        ]
+
+    ]
 
 
     await update.message.reply_text(
 
         "⚙️ پنل مدیریت",
 
-        async def admin_panel(update, context):
+        reply_markup=InlineKeyboardMarkup(keyboard)
+
+    )
 
     if not is_owner(update.effective_user.id):
         return
