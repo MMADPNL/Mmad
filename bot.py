@@ -2596,4 +2596,324 @@ async def message_handler(
     # ADMIN INPUT
     # -----------------------------
 
-    if
+    if is_owner(user.id):
+
+        handled = await handle_admin_text(
+            update,
+            context
+        )
+
+        if handled:
+            return
+
+    # -----------------------------
+    # BOT OFF
+    # -----------------------------
+
+    if (
+        not bot_is_on()
+        and not is_owner(user.id)
+    ):
+
+        await update.message.reply_text(
+            "🔴 ربات در حال حاضر خاموش است."
+        )
+
+        return
+
+    # -----------------------------
+    # BACK
+    # -----------------------------
+
+    if update.message.text == "🔙 برگشت":
+
+        await go_home(
+            update,
+            context
+        )
+
+        return
+
+    state = context.user_data.get(
+        "state"
+    )
+
+    # -----------------------------
+    # DEPOSIT
+    # -----------------------------
+
+    if state == "deposit_receipt":
+
+        await handle_deposit_receipt(
+            update,
+            context
+        )
+
+        return
+
+    if state == "deposit_amount":
+
+        await handle_deposit_amount(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # WITHDRAW
+    # -----------------------------
+
+    if state == "withdraw_address":
+
+        await handle_withdraw_address(
+            update,
+            context
+        )
+
+        return
+
+    if state == "withdraw_amount":
+
+        await handle_withdraw_amount(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # NORMAL BUTTONS
+    # -----------------------------
+
+    await button_handler(
+        update,
+        context
+    )
+
+
+# =========================================================
+# CHECK JOIN CALLBACK
+# =========================================================
+
+async def check_join_callback(
+    update,
+    context
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    if await check_membership(
+        update,
+        context
+    ):
+
+        await query.message.reply_text(
+
+            "✅ عضویت شما تأیید شد.\n\n"
+
+            "حالا می‌توانید از ربات استفاده کنید.",
+
+            reply_markup=main_keyboard(
+                query.from_user.id
+            )
+
+        )
+
+
+# =========================================================
+# MAIN
+# =========================================================
+
+def main():
+
+    if not BOT_TOKEN:
+
+        print(
+            "❌ BOT_TOKEN پیدا نشد."
+        )
+
+        return
+
+    app = (
+        Application
+        .builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
+
+    # -----------------------------
+    # START
+    # -----------------------------
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
+
+    # -----------------------------
+    # GAME
+    # -----------------------------
+
+    app.add_handler(
+        MessageHandler(
+
+            filters.TEXT
+            & filters.Regex(
+                r"^بازی\s+\d+$"
+            ),
+
+            game_command
+
+        )
+    )
+
+    # -----------------------------
+    # GAME CALLBACK
+    # -----------------------------
+
+    app.add_handler(
+        CallbackQueryHandler(
+
+            game_callback,
+
+            pattern=r"^(join_game|cancel_game)$"
+
+        )
+    )
+
+    # -----------------------------
+    # CHECK JOIN
+    # -----------------------------
+
+    app.add_handler(
+        CallbackQueryHandler(
+
+            check_join_callback,
+
+            pattern=r"^check_join$"
+
+        )
+    )
+
+    # -----------------------------
+    # DEPOSIT METHOD
+    # -----------------------------
+
+    app.add_handler(
+        CallbackQueryHandler(
+
+            deposit_method_callback,
+
+            pattern=r"^(deposit_ultra|deposit_exchange)$"
+
+        )
+    )
+
+    # -----------------------------
+    # DEPOSIT ADMIN
+    # -----------------------------
+
+    app.add_handler(
+        CallbackQueryHandler(
+
+            admin_deposit_callback,
+
+            pattern=r"^(ok_dep_|no_dep_)"
+
+        )
+    )
+
+    # -----------------------------
+    # WITHDRAW ADMIN
+    # -----------------------------
+
+    app.add_handler(
+        CallbackQueryHandler(
+
+            admin_withdraw_callback,
+
+            pattern=r"^(ok_wd_|no_wd_)"
+
+        )
+    )
+
+    # -----------------------------
+    # ADMIN PANEL
+    # -----------------------------
+
+    app.add_handler(
+        CallbackQueryHandler(
+
+            admin_panel_callback,
+
+            pattern=(
+                r"^admin_"
+            )
+
+        )
+    )
+
+    # -----------------------------
+    # PRIVATE TEXT + PHOTO
+    # -----------------------------
+
+    app.add_handler(
+        MessageHandler(
+
+            (
+                filters.TEXT
+                |
+                filters.PHOTO
+            )
+            & ~filters.COMMAND,
+
+            message_handler
+
+        )
+    )
+
+    print(
+        "======================================"
+    )
+
+    print(
+        "✅ BOT STARTED"
+    )
+
+    print(
+        "🤖 Telegram bot is running..."
+    )
+
+    print(
+        f"🎮 GAME: {MIN_GAME} - {MAX_GAME}"
+    )
+
+    print(
+        f"💳 MIN DEPOSIT: {MIN_DEPOSIT}"
+    )
+
+    print(
+        f"🎁 REFERRAL: {REFERRAL_REWARD}"
+    )
+
+    print(
+        "======================================"
+    )
+
+    app.run_polling(
+        drop_pending_updates=True
+    )
+
+
+# =========================================================
+# RUN
+# =========================================================
+
+if __name__ == "__main__":
+
+    main()
