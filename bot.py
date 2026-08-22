@@ -1996,14 +1996,35 @@ async def admin_panel(update, context):
 
             ],
 
-            [
-
-                InlineKeyboardButton(
-    "💰 اضافه کردن DOGS زیرمجموعه",
-    callback_data="add_ref_dogs"
-                )
-
-                )
+        await update.message.reply_text(
+    "⚙️ پنل مدیریت",
+    reply_markup=InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "📊 آمار کاربران",
+                callback_data="stats"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💰 اضافه کردن DOGS زیرمجموعه",
+                callback_data="add_ref_dogs"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔴 روشن / خاموش",
+                callback_data="toggle_bot"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "👑 انتقال مالکیت",
+                callback_data="owner_change"
+            )
+        ]
+    ])
+    )
 
             ],
 
