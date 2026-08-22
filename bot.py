@@ -1,4 +1,226 @@
+import os
+import json
+import time
+from datetime import datetime
+
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
+
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
+
+
 # =========================
+# SETTINGS
+# =========================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+OWNER_ID = 8552447077
+
+SUPPORT = "@CyyFr"
+
+ULTRA_ID = "@CyyFr"
+
+EXCHANGE_WALLET = "UQDuzMkT20XQbE4YLy5ZK7-pJzduzLPOoqhzIbOBJy3SpsiY"
+
+MIN_DEPOSIT = 5000
+MIN_WITHDRAW = 10000
+
+DATA_FILE = "data.json"
+
+
+# =========================
+# DATA
+# =========================
+
+DEFAULT = {
+    "owner": OWNER_ID,
+
+    "users": {},
+
+    "deposits": {},
+
+    "withdraws": {},
+
+    "settings": {
+        "bot": True,
+        "channel": "",
+        "group": ""
+    }
+}
+
+
+def load():
+
+    if not os.path.exists(DATA_FILE):
+        return DEFAULT
+
+    try:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    except:
+        return DEFAULT
+
+
+
+data = load()
+
+
+
+def save():
+
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+
+
+# =========================
+# USER
+# =========================
+
+def create_user(user):
+
+    uid = str(user.id)
+
+    if uid not in data["users"]:
+
+        data["users"][uid] = {
+            "id": user.id,
+            "name": user.first_name,
+            "username": user.username or "",
+            "balance": 0,
+            "ref": 0,
+            "date": str(datetime.now())
+        }
+
+        save()
+
+
+
+def get_user(uid):
+
+    return data["users"].get(str(uid))
+
+
+
+def get_balance(uid):
+
+    u = get_user(uid)
+
+    if not u:
+        return 0
+
+    return int(u["balance"])
+
+
+
+def add_balance(uid, amount):
+
+    u = get_user(uid)
+
+    if u:
+
+        u["balance"] += int(amount)
+
+        save()
+
+
+
+def remove_balance(uid, amount):
+
+    u = get_user(uid)
+
+    if not u:
+        return False
+
+    if u["balance"] < amount:
+        return False
+
+    u["balance"] -= int(amount)
+
+    save()
+
+    return True
+
+
+
+def owner(uid):
+
+    return int(uid) == int(data["owner"])
+
+
+
+# =========================
+# KEYBOARD
+# =========================
+
+def menu(uid):
+
+    k = [
+
+        ["💳 واریزی", "💰 برداشت"],
+
+        ["👤 پروفایل", "👥 زیرمجموعه"],
+
+        ["🎧 پشتیبانی"]
+
+    ]
+
+    if owner(uid):
+
+        k.append(
+            ["⚙️ پنل مدیریت"]
+        )
+
+
+    return ReplyKeyboardMarkup(
+        k,
+        resize_keyboard=True
+    )
+
+
+
+# =========================
+# START
+# =========================
+
+async def start(update, context):
+
+    user = update.effective_user
+
+    create_user(user)
+
+
+    await update.message.reply_text(
+
+        "🤖 خوش آمدید\n\n"
+
+        f"👤 {user.first_name}\n"
+
+        f"💰 موجودی: {get_balance(user.id):,} DOGS",
+
+        reply_markup=menu(user.id)
+
+            )
+
+    # =========================
 # ADMIN PANEL
 # =========================
 
@@ -172,7 +394,7 @@ async def admin_callback(update, context):
 
         await query.message.reply_text(
             "👑 آیدی عددی مالک جدید را بفرست:"
-    )
+)
 
 # =========================
 # DEPOSIT MENU
@@ -586,7 +808,7 @@ async def deposit_receipt(update, context):
         print(
             "OWNER SEND ERROR:",
             e
-    )
+        )
 
 # =========================
 # WITHDRAW MENU
@@ -1185,7 +1407,7 @@ async def approve_reject(update, context):
                 print(
                     "USER WITHDRAW REJECT MESSAGE ERROR:",
                     e
-        )
+            )
 
 # =========================
 # PROFILE
