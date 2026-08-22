@@ -1271,6 +1271,19 @@ def main():
 
     app.run_polling()
 
+async def start(update, context):
+
+    user = update.effective_user
+
+    create_user(user)
+
+    await update.message.reply_text(
+        "🤖 خوش آمدید\n\n"
+        f"👤 {user.first_name}\n"
+        f"💰 موجودی: {balance(user.id):,} DOGS",
+        reply_markup=main_keyboard(user.id)
+)
+    
 
 
 if __name__ == "__main__":
