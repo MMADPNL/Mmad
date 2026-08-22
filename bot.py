@@ -1982,23 +1982,13 @@ async def admin_panel(update, context):
 
         "⚙️ پنل مدیریت",
 
-        reply_markup=InlineKeyboardMarkup([
+        async def admin_panel(update, context):
 
-            [
+    if not is_owner(update.effective_user.id):
+        return
 
-                InlineKeyboardButton(
 
-                    "📊 آمار کاربران",
-
-                    callback_data="stats"
-
-                )
-
-            ],
-
-        await update.message.reply_text(
-    "⚙️ پنل مدیریت",
-    reply_markup=InlineKeyboardMarkup([
+    keyboard = [
         [
             InlineKeyboardButton(
                 "📊 آمار کاربران",
@@ -2023,36 +2013,13 @@ async def admin_panel(update, context):
                 callback_data="owner_change"
             )
         ]
-    ])
+    ]
+
+
+    await update.message.reply_text(
+        "⚙️ پنل مدیریت",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
-
-            ],
-
-            [
-
-                InlineKeyboardButton(
-
-                    "🔴 روشن / خاموش",
-
-                    callback_data="toggle_bot"
-
-                )
-
-            ],
-
-            [
-
-                InlineKeyboardButton(
-
-                    "👑 انتقال مالکیت",
-
-                    callback_data="owner_change"
-
-                )
-
-            ]
-
-        ])
 
     )
 
