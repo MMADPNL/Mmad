@@ -1999,10 +1999,9 @@ async def admin_panel(update, context):
             [
 
                 InlineKeyboardButton(
-
-                    "👥 اضافه کردن زیرمجموعه",
-
-                    callback_data="add_ref"
+    "💰 اضافه کردن DOGS زیرمجموعه",
+    callback_data="add_ref_dogs"
+                )
 
                 )
 
