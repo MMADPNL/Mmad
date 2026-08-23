@@ -1,13 +1,15 @@
-# ==========================================
-# DOGS BOT - bot.py
-# ==========================================
+# =========================================================
+# TAK BET - bot.py
+# Python 3.10+
+# python-telegram-bot 20+
+# =========================================================
 
 import os
 import re
 import random
 import sqlite3
 import logging
-import asyncio
+import threading
 from datetime import datetime
 
 from telegram import (
@@ -40,20 +42,22 @@ MIN_WITHDRAW = 10000
 
 DEFAULT_REFERRAL_REWARD = 50
 
-# سهم ثابت مالک در هر بازی
-OWNER_GAME_FEE = 50
-
-# درصد پرداخت به برنده
-WINNER_PERCENT = 90
+# بازی
+GAME_MIN = 500
+GAME_OWNER_FEE = 50
 
 DB_FILE = "bot.db"
+
+# =========================================================
+# LOGGING
+# =========================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("takbet")
 
 # =========================================================
 # DATABASE
@@ -66,29 +70,25 @@ db = sqlite3.connect(
 
 db.row_factory = sqlite3.Row
 
-db_lock = asyncio.Lock()
+db_lock = threading.RLock()
 
 
 def execute(query, params=(), fetchone=False, fetchall=False):
-    cur = db.cursor()
-    cur.execute(query, params)
-
-    if fetchone:
-        result = cur.fetchone()
+    with db_lock:
+        cur = db.cursor()
+        cur.execute(query, params)
         db.commit()
-        return result
 
-    if fetchall:
-        result = cur.fetchall()
-        db.commit()
-        return result
+        if fetchone:
+            return cur.fetchone()
 
-    db.commit()
-    return None
+        if fetchall:
+            return cur.fetchall()
+
+        return None
 
 
 def init_db():
-
     execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -105,6 +105,7 @@ def init_db():
             referrer_id INTEGER,
             blocked INTEGER DEFAULT 0,
             verified INTEGER DEFAULT 0,
+            phone TEXT,
             created_at TEXT
         )
     """)
@@ -118,6 +119,7 @@ def init_db():
             receipt_text TEXT,
             receipt_file_id TEXT,
             status TEXT DEFAULT 'pending',
+            owner_message_id INTEGER,
             created_at TEXT
         )
     """)
@@ -172,11 +174,10 @@ def init_db():
             file_id TEXT,
             file_type TEXT,
             status TEXT DEFAULT 'pending',
+            owner_message_id INTEGER,
             created_at TEXT
         )
     """)
-
-    # ---------------- GAME TABLE ----------------
 
     execute("""
         CREATE TABLE IF NOT EXISTS games (
@@ -184,18 +185,63 @@ def init_db():
             chat_id INTEGER NOT NULL,
             message_id INTEGER,
             creator_id INTEGER NOT NULL,
-            player2_id INTEGER,
+            opponent_id INTEGER,
             amount INTEGER NOT NULL,
             status TEXT DEFAULT 'waiting',
             winner_id INTEGER,
             loser_id INTEGER,
-            owner_fee INTEGER DEFAULT 0,
-            winner_reward INTEGER DEFAULT 0,
             created_at TEXT
         )
     """)
 
-    # ---------------- SETTINGS ----------------
+    # -----------------------------------------------------
+    # Migration برای دیتابیس‌های قبلی
+    # -----------------------------------------------------
+
+    columns = execute(
+        "PRAGMA table_info(users)",
+        fetchall=True,
+    )
+
+    column_names = {row["name"] for row in columns}
+
+    if "verified" not in column_names:
+        execute(
+            "ALTER TABLE users ADD COLUMN verified INTEGER DEFAULT 0"
+        )
+
+    if "phone" not in column_names:
+        execute(
+            "ALTER TABLE users ADD COLUMN phone TEXT"
+        )
+
+    deposit_columns = execute(
+        "PRAGMA table_info(deposits)",
+        fetchall=True,
+    )
+
+    deposit_names = {row["name"] for row in deposit_columns}
+
+    if "owner_message_id" not in deposit_names:
+        execute(
+            "ALTER TABLE deposits ADD COLUMN owner_message_id INTEGER"
+        )
+
+    support_columns = execute(
+        "PRAGMA table_info(support_messages)",
+        fetchall=True,
+    )
+
+    support_names = {row["name"] for row in support_columns}
+
+    if "owner_message_id" not in support_names:
+        execute(
+            "ALTER TABLE support_messages ADD COLUMN owner_message_id INTEGER"
+        )
+
+    # -----------------------------------------------------
+    # Settings
+    # -----------------------------------------------------
 
     owner = execute(
         "SELECT value FROM settings WHERE key='owner_id'",
@@ -229,6 +275,10 @@ def init_db():
             "INSERT INTO settings(key,value) VALUES('bot_enabled','1')"
         )
 
+
+# =========================================================
+# SETTINGS
+# =========================================================
 
 def get_setting(key, default=None):
     row = execute(
@@ -280,15 +330,15 @@ def bot_enabled():
     return get_setting("bot_enabled", "1") == "1"
 
 
-def set_bot_enabled(value):
+def set_bot_enabled(enabled):
     set_setting(
         "bot_enabled",
-        "1" if value else "0",
+        "1" if enabled else "0",
     )
 
 
 # =========================================================
-# USER
+# USERS
 # =========================================================
 
 def get_user(user_id):
@@ -313,11 +363,9 @@ def get_user_by_username(username):
 
 
 def create_or_update_user(tg_user, referrer_id=None):
-
     existing = get_user(tg_user.id)
 
     if existing:
-
         execute(
             """
             UPDATE users
@@ -336,7 +384,6 @@ def create_or_update_user(tg_user, referrer_id=None):
     valid_referrer = None
 
     if referrer_id and referrer_id != tg_user.id:
-
         referrer = get_user(referrer_id)
 
         if referrer:
@@ -353,9 +400,10 @@ def create_or_update_user(tg_user, referrer_id=None):
             referrer_id,
             blocked,
             verified,
+            phone,
             created_at
         )
-        VALUES (?, ?, ?, 0, ?, 0, 0, ?)
+        VALUES (?, ?, ?, 0, ?, 0, 0, NULL, ?)
         """,
         (
             tg_user.id,
@@ -366,12 +414,12 @@ def create_or_update_user(tg_user, referrer_id=None):
         ),
     )
 
+    # رفرال فقط یک بار
     if valid_referrer:
 
         reward = get_referral_reward()
 
         try:
-
             execute(
                 """
                 INSERT INTO referrals
@@ -431,63 +479,58 @@ def create_or_update_user(tg_user, referrer_id=None):
 
 
 def user_name(user):
-
-    if not user:
-        return "کاربر"
-
     if user["username"]:
-        return f"@{user['username']}"
+        return "@" + user["username"]
 
     return user["first_name"] or str(user["id"])
 
 
-def is_verified(user):
-    if not user:
+def is_blocked(user_id):
+    user = get_user(user_id)
+
+    return bool(
+        user and user["blocked"]
+    )
+
+
+def is_verified(user_id):
+    user = get_user(user_id)
+
+    return bool(
+        user and user["verified"]
+    )
+
+
+def admin_only(user_id):
+    return user_id == get_owner_id()
+
+
+# =========================================================
+# BOT ACCESS
+# =========================================================
+
+def operation_allowed(user_id):
+    if not bot_enabled():
+
+        # مالک همیشه پنل را دارد
+        if admin_only(user_id):
+            return True
+
         return False
 
-    # مالک نیازی به تأیید شماره ندارد
-    if user["id"] == get_owner_id():
-        return True
-
-    return bool(user["verified"])
+    return True
 
 
 # =========================================================
-# MAIN KEYBOARDS
+# KEYBOARDS
 # =========================================================
 
-def main_keyboard(user_id):
-
-    rows = [
-        ["💸 برداشت", "💰 واریزی"],
-        ["💳 موجودی", "🔄 انتقال"],
-        ["👥 زیرمجموعه", "🎧 پشتیبانی"],
-    ]
-
-    if user_id == get_owner_id():
-        rows.append(["🛠 پنل مدیریت"])
-
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-    )
-
-
-def cancel_keyboard():
-
-    return ReplyKeyboardMarkup(
-        [["❌ لغو"]],
-        resize_keyboard=True,
-    )
-
-
-def phone_keyboard():
-
+def verification_keyboard():
     return ReplyKeyboardMarkup(
         [
             [
                 KeyboardButton(
-                    "📱 تأیید شماره",
+                    "📱 تایید شماره",
                     request_contact=True,
                 )
             ]
@@ -497,161 +540,126 @@ def phone_keyboard():
     )
 
 
+def main_keyboard(user_id):
+    rows = [
+        ["💳 موجودی", "💰 واریزی"],
+        ["💸 برداشت", "🔄 انتقال"],
+        ["👥 زیرمجموعه", "🎧 پشتیبانی"],
+    ]
+
+    if admin_only(user_id):
+        rows.append(["🛠 پنل مدیریت"])
+
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+    )
+
+
+def cancel_keyboard():
+    return ReplyKeyboardMarkup(
+        [["❌ لغو"]],
+        resize_keyboard=True,
+    )
+
+
 def admin_keyboard():
+    status = "🟢 ربات روشن است" if bot_enabled() else "🔴 ربات خاموش است"
 
-    status = "🟢 روشن" if bot_enabled() else "🔴 خاموش"
-
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                status,
-                callback_data="admin_toggle_bot",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "👑 انتقال مالکیت",
-                callback_data="admin_transfer_owner",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "➕ شارژ موجودی",
-                callback_data="admin_add_balance",
-            ),
-            InlineKeyboardButton(
-                "➖ کسر موجودی",
-                callback_data="admin_remove_balance",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🎁 جایزه زیرمجموعه",
-                callback_data="admin_referral_reward",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "👥 موجودی کاربران",
-                callback_data="admin_balances",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "💰 واریزی‌ها",
-                callback_data="admin_deposits",
-            ),
-            InlineKeyboardButton(
-                "💸 برداشت‌ها",
-                callback_data="admin_withdrawals",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📊 آمار",
-                callback_data="admin_stats",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "🚫 مسدود / آزاد",
-                callback_data="admin_block",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "📢 همگانی",
-                callback_data="admin_broadcast",
-            ),
-        ],
-    ])
-
-
-# =========================================================
-# VERIFICATION
-# =========================================================
-
-async def request_verification(update, context):
-
-    await update.effective_message.reply_text(
-        "🔐 برای استفاده از ربات ابتدا شماره خود را تأیید کنید.\n\n"
-        "روی دکمه زیر بزنید و شماره همین حساب تلگرام را ارسال کنید.",
-        reply_markup=phone_keyboard(),
+            [
+                InlineKeyboardButton(
+                    status,
+                    callback_data="admin_toggle_bot",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "👑 انتقال مالکیت",
+                    callback_data="admin_transfer_owner",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "➕ شارژ موجودی",
+                    callback_data="admin_add_balance",
+                ),
+                InlineKeyboardButton(
+                    "➖ کسر موجودی",
+                    callback_data="admin_remove_balance",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🎁 جایزه زیرمجموعه",
+                    callback_data="admin_referral_reward",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "💰 واریزی‌ها",
+                    callback_data="admin_deposits",
+                ),
+                InlineKeyboardButton(
+                    "💸 برداشت‌ها",
+                    callback_data="admin_withdrawals",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "👥 کاربران",
+                    callback_data="admin_balances",
+                ),
+                InlineKeyboardButton(
+                    "📊 آمار",
+                    callback_data="admin_stats",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🚫 مسدود / آزاد",
+                    callback_data="admin_block",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📢 همگانی",
+                    callback_data="admin_broadcast",
+                )
+            ],
+        ]
     )
 
 
-async def contact_handler(update, context):
+# =========================================================
+# START + PHONE
+# =========================================================
 
-    if not update.message or not update.message.contact:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not update.effective_user:
         return
-
-    contact = update.message.contact
-    tg_user = update.effective_user
-
-    if contact.user_id != tg_user.id:
-        await update.message.reply_text(
-            "❌ فقط شماره متصل به همین حساب تلگرام قابل تأیید است."
-        )
-        return
-
-    user = create_or_update_user(tg_user)
-
-    execute(
-        """
-        UPDATE users
-        SET verified=1
-        WHERE id=?
-        """,
-        (tg_user.id,),
-    )
-
-    context.user_data.clear()
-
-    await update.message.reply_text(
-        "✅ شماره شما با موفقیت تأیید شد.\n\n"
-        "اکنون می‌توانید از ربات استفاده کنید.",
-        reply_markup=main_keyboard(user["id"]),
-    )
-
-
-# =========================================================
-# START
-# =========================================================
-
-async def start(update, context):
-
-    referrer_id = None
-
-    if context.args:
-
-        value = context.args[0]
-
-        if value.startswith("ref_"):
-
-            try:
-                referrer_id = int(value[4:])
-            except ValueError:
-                pass
 
     user = create_or_update_user(
-        update.effective_user,
-        referrer_id,
+        update.effective_user
     )
 
-    if user["blocked"]:
+    # state قبلی هیچ‌وقت روی /start اثر نگذارد
+    context.user_data.clear()
 
+    if user["blocked"]:
         await update.message.reply_text(
             "🚫 حساب شما مسدود شده است."
         )
-
         return
 
-    # مالک همیشه دسترسی دارد
-    if not is_verified(user):
+    if not user["verified"]:
 
-        await request_verification(
-            update,
-            context,
+        await update.message.reply_text(
+            "🔐 برای استفاده از ربات ابتدا شماره خود را تأیید کنید.\n\n"
+            "روی دکمه «📱 تایید شماره» بزنید.",
+            reply_markup=verification_keyboard(),
         )
 
         return
@@ -664,22 +672,68 @@ async def start(update, context):
     )
 
 
+async def contact_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    contact = update.message.contact
+    tg_user = update.effective_user
+
+    if not contact:
+        return
+
+    # شماره باید متعلق به خود ارسال‌کننده باشد
+    if contact.user_id != tg_user.id:
+        await update.message.reply_text(
+            "❌ باید شماره خودتان را ارسال کنید."
+        )
+        return
+
+    user = create_or_update_user(tg_user)
+
+    execute(
+        """
+        UPDATE users
+        SET verified=1, phone=?
+        WHERE id=?
+        """,
+        (
+            contact.phone_number,
+            tg_user.id,
+        ),
+    )
+
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "✅ شماره شما با موفقیت تأیید شد.\n\n"
+        "🎉 حالا می‌توانید از ربات استفاده کنید.",
+        reply_markup=main_keyboard(user["id"]),
+    )
+
+
 # =========================================================
 # BALANCE
 # =========================================================
 
-async def balance(update, context):
+async def balance(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
     )
 
-    if not is_verified(user):
-
-        await request_verification(update, context)
+    if user["blocked"]:
         return
 
-    if user["blocked"]:
+    if not is_verified(user["id"]):
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
         return
 
     await update.message.reply_text(
@@ -692,90 +746,91 @@ async def balance(update, context):
 # DEPOSIT
 # =========================================================
 
-async def deposit_start(update, context):
+async def deposit_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
     )
 
-    if not is_verified(user):
-
-        await request_verification(update, context)
-        return
+    context.user_data.clear()
 
     if user["blocked"]:
         return
 
-    if not bot_enabled():
+    if not is_verified(user["id"]):
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
+        return
 
+    if not operation_allowed(user["id"]):
         await update.message.reply_text(
             "🔴 ربات در حال حاضر خاموش است."
         )
-
         return
-
-    context.user_data.clear()
 
     context.user_data["state"] = "deposit_amount"
 
     await update.message.reply_text(
-        f"💰 مبلغ واریزی را وارد کنید.\n\n"
-        f"حداقل: {MIN_DEPOSIT:,} DOGS\n\n"
-        "فرمت پرداخت:\n"
-        "ULTRA 5000 DOGS @CyyFr",
+        "💰 مبلغ واریزی را وارد کنید.\n\n"
+        f"حداقل واریزی: {MIN_DEPOSIT:,} DOGS",
         reply_markup=cancel_keyboard(),
     )
 
 
-async def deposit_amount(update, context):
+async def deposit_amount(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     text = update.message.text.strip()
 
     if not text.isdigit():
-
         await update.message.reply_text(
             "❌ فقط عدد وارد کنید."
         )
-
         return
 
     amount = int(text)
 
     if amount < MIN_DEPOSIT:
-
         await update.message.reply_text(
             f"❌ حداقل واریزی {MIN_DEPOSIT:,} DOGS است."
         )
-
         return
 
     context.user_data["deposit_amount"] = amount
     context.user_data["state"] = "deposit_receipt"
 
     await update.message.reply_text(
-        f"💰 مبلغ: {amount:,} DOGS\n\n"
-        f"لطفاً مبلغ را واریز کنید:\n\n"
+        "💰 مبلغ واریزی:\n"
+        f"{amount:,} DOGS\n\n"
+        "فرمت واریز:\n\n"
         f"ULTRA {amount} DOGS @CyyFr\n\n"
-        "بعد از واریز رسید را ارسال کنید.\n"
-        "🖼 عکس / فایل / 📝 متن قابل قبول است.",
+        "بعد از پرداخت، رسید را به صورت عکس یا متن ارسال کنید.",
         reply_markup=cancel_keyboard(),
     )
 
 
-async def deposit_receipt(update, context):
+async def deposit_receipt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     amount = context.user_data.get(
         "deposit_amount"
     )
 
     if not amount:
-
         context.user_data.clear()
 
         await update.message.reply_text(
             "❌ درخواست منقضی شده است."
         )
-
         return
 
     user = create_or_update_user(
@@ -804,9 +859,8 @@ async def deposit_receipt(update, context):
     else:
 
         await update.message.reply_text(
-            "❌ فقط عکس، فایل یا متن رسید ارسال کنید."
+            "❌ عکس یا متن رسید ارسال کنید."
         )
-
         return
 
     execute(
@@ -834,39 +888,49 @@ async def deposit_receipt(update, context):
         ),
     )
 
-    deposit_id = execute(
-        "SELECT last_insert_rowid() AS id",
+    deposit = execute(
+        """
+        SELECT * FROM deposits
+        ORDER BY id DESC
+        LIMIT 1
+        """,
         fetchone=True,
-    )["id"]
+    )
+
+    deposit_id = deposit["id"]
 
     caption = (
         "💰 درخواست واریزی\n\n"
         f"🆔 #{deposit_id}\n"
-        f"👤 {user['first_name']}\n"
+        f"👤 {user['first_name'] or '-'}\n"
         f"🔢 ID: {user['id']}\n"
         f"📱 {user_name(user)}\n"
         f"💰 مبلغ: {amount:,} DOGS"
     )
 
-    keyboard = InlineKeyboardMarkup([
+    keyboard = InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "✅ تأیید",
-                callback_data=f"deposit_approve:{deposit_id}",
-            ),
-            InlineKeyboardButton(
-                "❌ رد",
-                callback_data=f"deposit_reject:{deposit_id}",
-            ),
+            [
+                InlineKeyboardButton(
+                    "✅ تأیید",
+                    callback_data=f"deposit_approve:{deposit_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ رد",
+                    callback_data=f"deposit_reject:{deposit_id}",
+                ),
+            ]
         ]
-    ])
+    )
+
+    owner_id = get_owner_id()
 
     try:
 
         if receipt_type == "photo":
 
-            await context.bot.send_photo(
-                chat_id=get_owner_id(),
+            sent = await context.bot.send_photo(
+                chat_id=owner_id,
                 photo=receipt_file_id,
                 caption=caption,
                 reply_markup=keyboard,
@@ -874,8 +938,8 @@ async def deposit_receipt(update, context):
 
         elif receipt_type == "document":
 
-            await context.bot.send_document(
-                chat_id=get_owner_id(),
+            sent = await context.bot.send_document(
+                chat_id=owner_id,
                 document=receipt_file_id,
                 caption=caption,
                 reply_markup=keyboard,
@@ -883,24 +947,36 @@ async def deposit_receipt(update, context):
 
         else:
 
-            await context.bot.send_message(
-                chat_id=get_owner_id(),
+            sent = await context.bot.send_message(
+                chat_id=owner_id,
                 text=caption + f"\n\n📝 رسید:\n{receipt_text}",
                 reply_markup=keyboard,
             )
 
+        execute(
+            """
+            UPDATE deposits
+            SET owner_message_id=?
+            WHERE id=?
+            """,
+            (
+                sent.message_id,
+                deposit_id,
+            ),
+        )
+
     except Exception as e:
 
-        logger.error(
-            "Deposit owner notification error: %s",
+        logger.exception(
+            "Could not send deposit to owner: %s",
             e,
         )
 
     context.user_data.clear()
 
     await update.message.reply_text(
-        "✅ رسید دریافت شد.\n"
-        "در انتظار بررسی مالک هستید.",
+        "✅ رسید شما دریافت شد.\n\n"
+        "⏳ در انتظار تأیید مالک هستید.",
         reply_markup=main_keyboard(user["id"]),
     )
 
@@ -909,39 +985,41 @@ async def deposit_receipt(update, context):
 # WITHDRAW
 # =========================================================
 
-async def withdraw_start(update, context):
+async def withdraw_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
     )
 
-    if not is_verified(user):
-
-        await request_verification(update, context)
-        return
+    context.user_data.clear()
 
     if user["blocked"]:
         return
 
-    if not bot_enabled():
-
+    if not is_verified(user["id"]):
         await update.message.reply_text(
-            "🔴 ربات خاموش است."
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
         )
+        return
 
+    if not operation_allowed(user["id"]):
+        await update.message.reply_text(
+            "🔴 ربات در حال حاضر خاموش است."
+        )
         return
 
     if user["balance"] < MIN_WITHDRAW:
-
         await update.message.reply_text(
             f"❌ موجودی کافی نیست.\n\n"
             f"حداقل برداشت: {MIN_WITHDRAW:,} DOGS\n"
-            f"موجودی: {user['balance']:,} DOGS"
+            f"موجودی شما: {user['balance']:,} DOGS"
         )
-
         return
 
-    context.user_data.clear()
     context.user_data["state"] = "withdraw_amount"
 
     await update.message.reply_text(
@@ -952,35 +1030,38 @@ async def withdraw_start(update, context):
     )
 
 
-async def withdraw_amount(update, context):
+async def withdraw_amount(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.message.text:
+        return
 
     text = update.message.text.strip()
 
     if not text.isdigit():
-
         await update.message.reply_text(
             "❌ فقط عدد وارد کنید."
         )
-
         return
 
     amount = int(text)
-    user = get_user(update.effective_user.id)
 
     if amount < MIN_WITHDRAW:
-
         await update.message.reply_text(
             f"❌ حداقل برداشت {MIN_WITHDRAW:,} DOGS است."
         )
-
         return
 
-    if amount > user["balance"]:
+    user = get_user(
+        update.effective_user.id
+    )
 
+    if not user or user["balance"] < amount:
         await update.message.reply_text(
             "❌ موجودی کافی نیست."
         )
-
         return
 
     context.user_data["withdraw_amount"] = amount
@@ -988,13 +1069,18 @@ async def withdraw_amount(update, context):
 
     await update.message.reply_text(
         "📍 مقصد برداشت را وارد کنید:\n\n"
+        "مثال:\n"
         "@username\n"
-        "یا آیدی عددی",
+        "یا\n"
+        "123456789",
         reply_markup=cancel_keyboard(),
     )
 
 
-async def withdraw_destination(update, context):
+async def withdraw_destination(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     destination = update.message.text.strip()
 
@@ -1005,379 +1091,321 @@ async def withdraw_destination(update, context):
             destination,
         )
     ):
-
         await update.message.reply_text(
             "❌ مقصد نامعتبر است."
         )
-
         return
 
     amount = context.user_data.get(
         "withdraw_amount"
     )
 
-    user = get_user(update.effective_user.id)
-
     if not amount:
-
         context.user_data.clear()
         return
 
-    # ضد دوباره‌خرج کردن موجودی
-    changed = execute(
-        """
-        UPDATE users
-        SET balance=balance-?
-        WHERE id=? AND balance>=?
-        """,
-        (
-            amount,
-            user["id"],
-            amount,
-        ),
-    )
+    user_id = update.effective_user.id
 
-    if changed is None:
-        pass
+    # رزرو اتمیک موجودی
+    with db_lock:
 
-    check = get_user(user["id"])
+        cur = db.cursor()
 
-    if check["balance"] < 0:
-
-        execute(
+        cur.execute(
             """
             UPDATE users
-            SET balance=balance+?
+            SET balance=balance-?
             WHERE id=?
+            AND balance>=?
             """,
-            (amount, user["id"]),
+            (
+                amount,
+                user_id,
+                amount,
+            ),
         )
 
-        await update.message.reply_text(
-            "❌ موجودی کافی نیست."
+        if cur.rowcount != 1:
+            db.rollback()
+
+            await update.message.reply_text(
+                "❌ موجودی کافی نیست."
+            )
+            return
+
+        cur.execute(
+            """
+            INSERT INTO withdrawals
+            (
+                user_id,
+                amount,
+                destination,
+                status,
+                created_at
+            )
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                user_id,
+                amount,
+                destination,
+                "pending",
+                datetime.now().isoformat(),
+            ),
         )
 
-        return
+        withdrawal_id = cur.lastrowid
 
-    execute(
-        """
-        INSERT INTO withdrawals
-        (
-            user_id,
-            amount,
-            destination,
-            status,
-            created_at
-        )
-        VALUES (?,?,?,?,?)
-        """,
-        (
-            user["id"],
-            amount,
-            destination,
-            "pending",
-            datetime.now().isoformat(),
-        ),
-    )
+        db.commit()
 
-    withdrawal_id = execute(
-        "SELECT last_insert_rowid() AS id",
-        fetchone=True,
-    )["id"]
+    user = get_user(user_id)
 
-    keyboard = InlineKeyboardMarkup([
+    keyboard = InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "✅ تأیید برداشت",
-                callback_data=f"withdraw_approve:{withdrawal_id}",
-            ),
-            InlineKeyboardButton(
-                "❌ رد برداشت",
-                callback_data=f"withdraw_reject:{withdrawal_id}",
-            ),
+            [
+                InlineKeyboardButton(
+                    "✅ تأیید برداشت",
+                    callback_data=f"withdraw_approve:{withdrawal_id}",
+                ),
+                InlineKeyboardButton(
+                    "❌ رد برداشت",
+                    callback_data=f"withdraw_reject:{withdrawal_id}",
+                ),
+            ]
         ]
-    ])
-
-    await context.bot.send_message(
-        chat_id=get_owner_id(),
-        text=(
-            "💸 درخواست برداشت جدید\n\n"
-            f"🆔 #{withdrawal_id}\n"
-            f"👤 {user['first_name']}\n"
-            f"🔢 ID: {user['id']}\n"
-            f"📱 {user_name(user)}\n"
-            f"💰 {amount:,} DOGS\n"
-            f"📍 {destination}"
-        ),
-        reply_markup=keyboard,
-    )
-
-    context.user_data.clear()
-
-    await update.message.reply_text(
-        "✅ درخواست برداشت ثبت شد.",
-        reply_markup=main_keyboard(user["id"]),
-    )
-
-
-# =========================================================
-# TRANSFER - ONLY REPLY
-# =========================================================
-
-async def transfer_start(update, context):
-
-    user = create_or_update_user(
-        update.effective_user
-    )
-
-    if not is_verified(user):
-
-        await request_verification(update, context)
-        return
-
-    if user["blocked"]:
-        return
-
-    context.user_data.clear()
-
-    context.user_data["state"] = "transfer_amount"
-
-    await update.message.reply_text(
-        "🔄 برای انتقال فقط روی پیام کاربر Reply کنید "
-        "و بنویسید:\n\n"
-        "انتقال 500\n\n"
-        "یا فقط:\n"
-        "500",
-        reply_markup=cancel_keyboard(),
-    )
-
-
-async def transfer_amount(update, context):
-
-    if not update.message.reply_to_message:
-
-        await update.message.reply_text(
-            "❌ انتقال فقط با Reply به پیام کاربر انجام می‌شود."
-        )
-
-        return
-
-    text = update.message.text.strip()
-
-    if text.startswith("انتقال"):
-
-        parts = text.split()
-
-        if len(parts) != 2 or not parts[1].isdigit():
-
-            await update.message.reply_text(
-                "❌ فرمت صحیح:\nانتقال 500"
-            )
-
-            return
-
-        amount = int(parts[1])
-
-    else:
-
-        if not text.isdigit():
-
-            await update.message.reply_text(
-                "❌ مبلغ نامعتبر است."
-            )
-
-            return
-
-        amount = int(text)
-
-    target = update.message.reply_to_message.from_user
-
-    if not target or target.is_bot:
-
-        await update.message.reply_text(
-            "❌ مقصد نامعتبر است."
-        )
-
-        return
-
-    receiver = get_user(target.id)
-
-    if not receiver:
-
-        receiver = create_or_update_user(target)
-
-    await complete_transfer(
-        update,
-        context,
-        receiver["id"],
-        amount,
-    )
-
-
-async def complete_transfer(
-    update,
-    context,
-    receiver_id,
-    amount,
-):
-
-    sender_id = update.effective_user.id
-
-    if amount <= 0:
-
-        await update.message.reply_text(
-            "❌ مبلغ نامعتبر است."
-        )
-
-        return
-
-    sender = get_user(sender_id)
-    receiver = get_user(receiver_id)
-
-    if not sender or not receiver:
-
-        await update.message.reply_text(
-            "❌ کاربر پیدا نشد."
-        )
-
-        return
-
-    if sender_id == receiver_id:
-
-        await update.message.reply_text(
-            "❌ نمی‌توانید به خودتان انتقال دهید."
-        )
-
-        return
-
-    # اتمیک
-    changed = execute(
-        """
-        UPDATE users
-        SET balance=balance-?
-        WHERE id=? AND balance>=?
-        """,
-        (
-            amount,
-            sender_id,
-            amount,
-        ),
-    )
-
-    sender_after = get_user(sender_id)
-
-    if sender_after["balance"] < 0:
-
-        execute(
-            """
-            UPDATE users
-            SET balance=balance+?
-            WHERE id=?
-            """,
-            (amount, sender_id),
-        )
-
-        await update.message.reply_text(
-            "❌ موجودی کافی نیست."
-        )
-
-        return
-
-    execute(
-        """
-        UPDATE users
-        SET balance=balance+?
-        WHERE id=?
-        """,
-        (
-            amount,
-            receiver_id,
-        ),
-    )
-
-    now = datetime.now().isoformat()
-
-    execute(
-        """
-        INSERT INTO transfers
-        (
-            sender_id,
-            receiver_id,
-            amount,
-            created_at
-        )
-        VALUES (?,?,?,?)
-        """,
-        (
-            sender_id,
-            receiver_id,
-            amount,
-            now,
-        ),
-    )
-
-    execute(
-        """
-        INSERT INTO transactions
-        (
-            user_id,
-            type,
-            amount,
-            description,
-            created_at
-        )
-        VALUES (?,?,?,?,?)
-        """,
-        (
-            sender_id,
-            "transfer_out",
-            -amount,
-            f"To {receiver_id}",
-            now,
-        ),
-    )
-
-    execute(
-        """
-        INSERT INTO transactions
-        (
-            user_id,
-            type,
-            amount,
-            description,
-            created_at
-        )
-        VALUES (?,?,?,?,?)
-        """,
-        (
-            receiver_id,
-            "transfer_in",
-            amount,
-            f"From {sender_id}",
-            now,
-        ),
-    )
-
-    context.user_data.clear()
-
-    await update.message.reply_text(
-        f"✅ انتقال انجام شد.\n\n"
-        f"💰 {amount:,} DOGS\n"
-        f"👤 مقصد: {user_name(receiver)}",
-        reply_markup=main_keyboard(sender_id),
     )
 
     try:
 
         await context.bot.send_message(
-            chat_id=receiver_id,
+            chat_id=get_owner_id(),
             text=(
-                "💰 انتقال دریافت کردید.\n\n"
+                "💸 درخواست برداشت جدید\n\n"
+                f"🆔 #{withdrawal_id}\n"
+                f"👤 {user['first_name'] or '-'}\n"
+                f"🔢 ID: {user['id']}\n"
+                f"📱 {user_name(user)}\n"
+                f"💰 مبلغ: {amount:,} DOGS\n"
+                f"📍 مقصد: {destination}"
+            ),
+            reply_markup=keyboard,
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "withdraw owner notify failed: %s",
+            e,
+        )
+
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "✅ درخواست برداشت ثبت شد.\n"
+        "⏳ در انتظار بررسی مالک.",
+        reply_markup=main_keyboard(user_id),
+    )
+
+
+# =========================================================
+# TRANSFER - ONLY REPLY IN GROUP
+# =========================================================
+
+async def transfer_by_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    message = update.message
+
+    if not message.reply_to_message:
+        await message.reply_text(
+            "❌ انتقال فقط با Reply انجام می‌شود.\n\n"
+            "روی پیام کاربر Reply کنید و بنویسید:\n"
+            "انتقال 500"
+        )
+        return
+
+    if not message.text:
+        return
+
+    match = re.fullmatch(
+        r"\s*انتقال\s+(\d+)\s*",
+        message.text,
+    )
+
+    if not match:
+        return
+
+    amount = int(match.group(1))
+
+    if amount <= 0:
+        await message.reply_text(
+            "❌ مبلغ نامعتبر است."
+        )
+        return
+
+    sender_id = update.effective_user.id
+
+    receiver_tg = message.reply_to_message.from_user
+
+    if not receiver_tg or receiver_tg.is_bot:
+        await message.reply_text(
+            "❌ این کاربر قابل انتقال نیست."
+        )
+        return
+
+    sender = get_user(sender_id)
+    receiver = get_user(receiver_tg.id)
+
+    if not sender or not sender["verified"]:
+        await message.reply_text(
+            "🔐 ابتدا در خصوصی ربات شماره خود را تأیید کنید."
+        )
+        return
+
+    if not receiver:
+        receiver = create_or_update_user(
+            receiver_tg
+        )
+
+    if not receiver["verified"]:
+        await message.reply_text(
+            "❌ گیرنده هنوز شماره خود را تأیید نکرده است."
+        )
+        return
+
+    if sender_id == receiver_tg.id:
+        await message.reply_text(
+            "❌ نمی‌توانید به خودتان انتقال دهید."
+        )
+        return
+
+    if not operation_allowed(sender_id):
+        await message.reply_text(
+            "🔴 ربات خاموش است؛ موجودی کسر نشد."
+        )
+        return
+
+    # انتقال کاملاً اتمیک
+    with db_lock:
+
+        cur = db.cursor()
+
+        cur.execute(
+            """
+            UPDATE users
+            SET balance=balance-?
+            WHERE id=?
+            AND balance>=?
+            """,
+            (
+                amount,
+                sender_id,
+                amount,
+            ),
+        )
+
+        if cur.rowcount != 1:
+            db.rollback()
+
+            await message.reply_text(
+                "❌ موجودی کافی نیست."
+            )
+            return
+
+        cur.execute(
+            """
+            UPDATE users
+            SET balance=balance+?
+            WHERE id=?
+            """,
+            (
+                amount,
+                receiver_tg.id,
+            ),
+        )
+
+        now = datetime.now().isoformat()
+
+        cur.execute(
+            """
+            INSERT INTO transfers
+            (
+                sender_id,
+                receiver_id,
+                amount,
+                created_at
+            )
+            VALUES (?,?,?,?)
+            """,
+            (
+                sender_id,
+                receiver_tg.id,
+                amount,
+                now,
+            ),
+        )
+
+        cur.execute(
+            """
+            INSERT INTO transactions
+            (
+                user_id,
+                type,
+                amount,
+                description,
+                created_at
+            )
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                sender_id,
+                "transfer_out",
+                -amount,
+                f"To {receiver_tg.id}",
+                now,
+            ),
+        )
+
+        cur.execute(
+            """
+            INSERT INTO transactions
+            (
+                user_id,
+                type,
+                amount,
+                description,
+                created_at
+            )
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                receiver_tg.id,
+                "transfer_in",
+                amount,
+                f"From {sender_id}",
+                now,
+            ),
+        )
+
+        db.commit()
+
+    await message.reply_text(
+        "✅ انتقال انجام شد.\n\n"
+        f"💰 مبلغ: {amount:,} DOGS\n"
+        f"👤 گیرنده: {user_name(receiver)}"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=receiver_tg.id,
+            text=(
+                "💰 انتقال جدید دریافت کردید.\n\n"
                 f"مبلغ: {amount:,} DOGS\n"
                 f"از: {user_name(sender)}"
             ),
         )
-
     except Exception:
         pass
 
@@ -1386,23 +1414,23 @@ async def complete_transfer(
 # REFERRALS
 # =========================================================
 
-async def referrals(update, context):
+async def referrals(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
     )
 
-    if not is_verified(user):
-
-        await request_verification(update, context)
+    if not user["verified"]:
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
         return
 
     bot = await context.bot.get_me()
-
-    link = (
-        f"https://t.me/{bot.username}"
-        f"?start=ref_{user['id']}"
-    )
 
     count = execute(
         """
@@ -1414,11 +1442,16 @@ async def referrals(update, context):
         fetchone=True,
     )["c"]
 
+    link = (
+        f"https://t.me/{bot.username}"
+        f"?start=ref_{user['id']}"
+    )
+
     await update.message.reply_text(
         "👥 زیرمجموعه\n\n"
         f"👤 تعداد: {count}\n"
-        f"🎁 پاداش: {get_referral_reward():,} DOGS\n\n"
-        f"🔗 لینک:\n{link}"
+        f"🎁 جایزه هر نفر: {get_referral_reward():,} DOGS\n\n"
+        f"🔗 لینک دعوت:\n{link}"
     )
 
 
@@ -1426,29 +1459,37 @@ async def referrals(update, context):
 # SUPPORT
 # =========================================================
 
-async def support_start(update, context):
+async def support_start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
     )
 
-    if not is_verified(user):
-
-        await request_verification(update, context)
-        return
-
     context.user_data.clear()
+
+    if not user["verified"]:
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
+        return
 
     context.user_data["state"] = "support"
 
     await update.message.reply_text(
-        "🎧 پیام خود را بفرستید.\n"
-        "متن، عکس یا فایل قابل قبول است.",
+        "🎧 پیام خود را ارسال کنید.\n\n"
+        "متن، عکس یا فایل قابل ارسال است.",
         reply_markup=cancel_keyboard(),
     )
 
 
-async def support_message(update, context):
+async def support_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
@@ -1475,9 +1516,8 @@ async def support_message(update, context):
     else:
 
         await update.message.reply_text(
-            "❌ نوع پیام پشتیبانی نمی‌شود."
+            "❌ این نوع پیام پشتیبانی پشتیبانی نمی‌شود."
         )
-
         return
 
     execute(
@@ -1503,59 +1543,69 @@ async def support_message(update, context):
         ),
     )
 
-    support_id = execute(
-        "SELECT last_insert_rowid() AS id",
+    support = execute(
+        """
+        SELECT * FROM support_messages
+        ORDER BY id DESC
+        LIMIT 1
+        """,
         fetchone=True,
-    )["id"]
+    )
+
+    support_id = support["id"]
 
     caption = (
         "🎧 پیام پشتیبانی\n\n"
         f"🆔 #{support_id}\n"
-        f"👤 {user_name(user)}\n"
-        f"🔢 {user['id']}"
+        f"👤 {user['first_name'] or '-'}\n"
+        f"🔢 ID: {user['id']}\n"
+        f"📱 {user_name(user)}\n\n"
+        "↩️ برای پاسخ، روی همین پیام Reply کنید."
     )
 
-    reply_keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "💬 پاسخ",
-                callback_data=f"support_reply:{support_id}",
-            )
-        ]
-    ])
+    owner_id = get_owner_id()
 
     try:
 
         if file_type == "photo":
 
-            await context.bot.send_photo(
-                chat_id=get_owner_id(),
+            sent = await context.bot.send_photo(
+                chat_id=owner_id,
                 photo=file_id,
                 caption=caption,
-                reply_markup=reply_keyboard,
             )
 
         elif file_type == "document":
 
-            await context.bot.send_document(
-                chat_id=get_owner_id(),
+            sent = await context.bot.send_document(
+                chat_id=owner_id,
                 document=file_id,
                 caption=caption,
-                reply_markup=reply_keyboard,
             )
 
         else:
 
-            await context.bot.send_message(
-                chat_id=get_owner_id(),
+            sent = await context.bot.send_message(
+                chat_id=owner_id,
                 text=caption + f"\n\n📝 {text}",
-                reply_markup=reply_keyboard,
             )
+
+        execute(
+            """
+            UPDATE support_messages
+            SET owner_message_id=?
+            WHERE id=?
+            """,
+            (
+                sent.message_id,
+                support_id,
+            ),
+        )
 
     except Exception as e:
 
-        logger.error(
-            "Support send error: %s",
+        logger.exception(
+            "support notify failed: %s",
             e,
         )
 
@@ -1568,162 +1618,219 @@ async def support_message(update, context):
 
 
 # =========================================================
+# OWNER SUPPORT REPLY
+# =========================================================
+
+async def owner_reply_support(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not admin_only(update.effective_user.id):
+        return False
+
+    if not update.message.reply_to_message:
+        return False
+
+    replied_id = update.message.reply_to_message.message_id
+
+    support = execute(
+        """
+        SELECT * FROM support_messages
+        WHERE owner_message_id=?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (replied_id,),
+        fetchone=True,
+    )
+
+    if not support:
+        return False
+
+    if not update.message.text:
+        return False
+
+    answer = update.message.text.strip()
+
+    if not answer:
+        return True
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=support["user_id"],
+            text=(
+                "🎧 پاسخ پشتیبانی\n\n"
+                f"{answer}"
+            ),
+        )
+
+        execute(
+            """
+            UPDATE support_messages
+            SET status='answered'
+            WHERE id=?
+            """,
+            (support["id"],),
+        )
+
+        await update.message.reply_text(
+            "✅ پاسخ برای کاربر ارسال شد."
+        )
+
+    except Exception:
+
+        await update.message.reply_text(
+            "❌ ارسال پاسخ انجام نشد."
+        )
+
+    return True
+
+
+# =========================================================
 # GAME
 # =========================================================
 
 def game_keyboard(game_id):
-
-    return InlineKeyboardMarkup([
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton(
-                "🎮 بازی با دوستان",
-                callback_data=f"game_join:{game_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌ لغو",
-                callback_data=f"game_cancel:{game_id}",
-            )
-        ],
-    ])
-
-
-async def create_game(update, context, amount):
-
-    user = create_or_update_user(
-        update.effective_user
+            [
+                InlineKeyboardButton(
+                    "🎮 بازی با دوستان",
+                    callback_data=f"game_join:{game_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ لغو",
+                    callback_data=f"game_cancel:{game_id}",
+                )
+            ],
+        ]
     )
 
-    if not is_verified(user):
 
+async def create_game(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    amount: int,
+):
+
+    if update.effective_chat.type not in (
+        "group",
+        "supergroup",
+    ):
         await update.message.reply_text(
-            "🔐 ابتدا در پیوی ربات شماره خود را تأیید کنید."
+            "❌ بازی باید داخل گروه ساخته شود."
         )
+        return
 
+    user = get_user(update.effective_user.id)
+
+    if not user or not user["verified"]:
+        await update.message.reply_text(
+            "🔐 ابتدا در خصوصی ربات /start را بزنید و شماره خود را تأیید کنید."
+        )
         return
 
     if user["blocked"]:
-
-        await update.message.reply_text(
-            "🚫 حساب شما مسدود است."
-        )
-
         return
 
-    if not bot_enabled():
-
+    if not operation_allowed(user["id"]):
         await update.message.reply_text(
-            "🔴 ربات خاموش است."
+            "🔴 ربات خاموش است؛ هیچ موجودی کسر نمی‌شود."
         )
-
         return
 
-    if amount < 500:
-
+    if amount < GAME_MIN:
         await update.message.reply_text(
-            "❌ حداقل مبلغ بازی 500 DOGS است."
+            f"❌ حداقل مبلغ بازی {GAME_MIN:,} DOGS است."
         )
-
         return
 
     if user["balance"] < amount:
-
-        await update.message.reply_text(
-            "❌ موجودی شما کافی نیست.\n\n"
-            f"موجودی: {user['balance']:,} DOGS"
-        )
-
-        return
-
-    # فقط یک بازی باز برای هر سازنده در همان گروه
-    old = execute(
-        """
-        SELECT id FROM games
-        WHERE chat_id=?
-        AND creator_id=?
-        AND status='waiting'
-        LIMIT 1
-        """,
-        (
-            update.effective_chat.id,
-            user["id"],
-        ),
-        fetchone=True,
-    )
-
-    if old:
-
-        await update.message.reply_text(
-            "❌ شما همین الان یک بازی در انتظار دارید."
-        )
-
-        return
-
-    # مبلغ از سازنده هنگام ساخت رزرو می‌شود
-    execute(
-        """
-        UPDATE users
-        SET balance=balance-?
-        WHERE id=? AND balance>=?
-        """,
-        (
-            amount,
-            user["id"],
-            amount,
-        ),
-    )
-
-    check = get_user(user["id"])
-
-    if check["balance"] < 0:
-
-        execute(
-            """
-            UPDATE users
-            SET balance=balance+?
-            WHERE id=?
-            """,
-            (amount, user["id"]),
-        )
-
         await update.message.reply_text(
             "❌ موجودی کافی نیست."
         )
-
         return
 
-    execute(
+    # فقط یک بازی فعال برای همان کاربر
+    existing = execute(
         """
-        INSERT INTO games
-        (
-            chat_id,
-            creator_id,
-            amount,
-            status,
-            created_at
-        )
-        VALUES (?,?,?,?,?)
+        SELECT * FROM games
+        WHERE creator_id=?
+        AND status='waiting'
+        LIMIT 1
         """,
-        (
-            update.effective_chat.id,
-            user["id"],
-            amount,
-            "waiting",
-            datetime.now().isoformat(),
-        ),
+        (user["id"],),
+        fetchone=True,
     )
 
-    game_id = execute(
-        "SELECT last_insert_rowid() AS id",
-        fetchone=True,
-    )["id"]
+    if existing:
+        await update.message.reply_text(
+            "❌ شما یک بازی در انتظار ورود بازیکن دارید."
+        )
+        return
 
-    msg = await update.message.reply_text(
+    # رزرو پول سازنده
+    with db_lock:
+
+        cur = db.cursor()
+
+        cur.execute(
+            """
+            UPDATE users
+            SET balance=balance-?
+            WHERE id=?
+            AND balance>=?
+            """,
+            (
+                amount,
+                user["id"],
+                amount,
+            ),
+        )
+
+        if cur.rowcount != 1:
+            db.rollback()
+
+            await update.message.reply_text(
+                "❌ موجودی کافی نیست."
+            )
+            return
+
+        cur.execute(
+            """
+            INSERT INTO games
+            (
+                chat_id,
+                creator_id,
+                amount,
+                status,
+                created_at
+            )
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                update.effective_chat.id,
+                user["id"],
+                amount,
+                "waiting",
+                datetime.now().isoformat(),
+            ),
+        )
+
+        game_id = cur.lastrowid
+
+        db.commit()
+
+    sent = await update.message.reply_text(
         "🎮 بازی جدید\n\n"
-        f"💰 مبلغ: {amount:,} DOGS\n"
+        f"💰 مبلغ ورود: {amount:,} DOGS\n"
         f"👤 سازنده: {user_name(user)}\n\n"
-        "یک نفر برای ورود روی دکمه زیر بزند.",
+        "یک نفر می‌تواند وارد بازی شود.\n"
+        "بعد از ورود، بازی فوراً انجام می‌شود.",
         reply_markup=game_keyboard(game_id),
     )
 
@@ -1734,265 +1841,116 @@ async def create_game(update, context, amount):
         WHERE id=?
         """,
         (
-            msg.message_id,
+            sent.message_id,
             game_id,
         ),
     )
 
 
-async def join_game(query, context, game_id):
+async def finish_game(
+    game_id,
+    opponent_id,
+    context,
+):
 
-    async with db_lock:
+    with db_lock:
 
         game = execute(
-            "SELECT * FROM games WHERE id=?",
+            """
+            SELECT * FROM games
+            WHERE id=?
+            """,
             (game_id,),
             fetchone=True,
         )
 
         if not game:
-
-            await query.answer(
-                "❌ بازی پیدا نشد.",
-                show_alert=True,
-            )
-
-            return
+            return False
 
         if game["status"] != "waiting":
+            return False
 
-            await query.answer(
-                "❌ این بازی قبلاً شروع شده.",
-                show_alert=True,
-            )
-
-            return
-
-        player2_id = query.from_user.id
-
-        if player2_id == game["creator_id"]:
-
-            await query.answer(
-                "❌ نمی‌توانید وارد بازی خودتان شوید.",
-                show_alert=True,
-            )
-
-            return
-
-        player2 = get_user(player2_id)
-
-        if not player2:
-
-            player2 = create_or_update_user(
-                query.from_user
-            )
-
-        if not is_verified(player2):
-
-            await query.answer(
-                "🔐 ابتدا شماره خود را در پیوی ربات تأیید کنید.",
-                show_alert=True,
-            )
-
-            return
-
-        if player2["blocked"]:
-
-            await query.answer(
-                "🚫 حساب شما مسدود است.",
-                show_alert=True,
-            )
-
-            return
-
-        if not bot_enabled():
-
-            await query.answer(
-                "🔴 ربات خاموش است.",
-                show_alert=True,
-            )
-
-            return
-
+        creator_id = game["creator_id"]
         amount = game["amount"]
 
-        if player2["balance"] < amount:
+        if creator_id == opponent_id:
+            return False
 
-            await query.answer(
-                "❌ موجودی شما کافی نیست.",
-                show_alert=True,
-            )
-
-            return
-
-        # اول بازی را قفل می‌کنیم
-        changed = execute(
+        # بررسی موجودی نفر دوم
+        opponent = execute(
             """
-            UPDATE games
-            SET player2_id=?,
-                status='playing'
+            SELECT * FROM users
             WHERE id=?
-            AND status='waiting'
             """,
-            (
-                player2_id,
-                game_id,
-            ),
-        )
-
-        # بررسی دوباره
-        game = execute(
-            "SELECT * FROM games WHERE id=?",
-            (game_id,),
+            (opponent_id,),
             fetchone=True,
         )
 
-        if game["status"] != "playing" or game["player2_id"] != player2_id:
+        if not opponent or opponent["balance"] < amount:
+            return False
 
-            await query.answer(
-                "❌ شخص دیگری وارد بازی شد.",
-                show_alert=True,
-            )
+        # نفر دوم مبلغ را وارد بازی می‌کند
+        cur = db.cursor()
 
-            return
-
-        # کسر مبلغ نفر دوم
-        execute(
+        cur.execute(
             """
             UPDATE users
             SET balance=balance-?
-            WHERE id=? AND balance>=?
+            WHERE id=?
+            AND balance>=?
             """,
             (
                 amount,
-                player2_id,
+                opponent_id,
                 amount,
             ),
         )
 
-        player2_after = get_user(player2_id)
+        if cur.rowcount != 1:
+            db.rollback()
+            return False
 
-        if player2_after["balance"] < 0:
-
-            execute(
-                """
-                UPDATE users
-                SET balance=balance+?
-                WHERE id=?
-                """,
-                (
-                    amount,
-                    player2_id,
-                ),
-            )
-
-            execute(
-                """
-                UPDATE games
-                SET status='waiting',
-                    player2_id=NULL
-                WHERE id=?
-                """,
-                (game_id,),
-            )
-
-            await query.answer(
-                "❌ موجودی شما کافی نیست.",
-                show_alert=True,
-            )
-
-            return
-
-        # -------------------------------
-        # شروع فوری بازی
-        # -------------------------------
-
-        creator = get_user(game["creator_id"])
-        player2 = get_user(player2_id)
-
-        # انتخاب تصادفی برنده
-        winner_id = random.choice([
-            creator["id"],
-            player2["id"],
-        ])
-
-        loser_id = (
-            player2["id"]
-            if winner_id == creator["id"]
-            else creator["id"]
+        # انتخاب برنده
+        winner_id, loser_id = random.sample(
+            [creator_id, opponent_id],
+            2,
         )
 
-        # مبلغ کل دو بازیکن
+        # مجموع = دو ورودی
         total = amount * 2
 
-        # برنده 90 درصد کل مبلغ
-        winner_reward = (total * WINNER_PERCENT) // 100
+        # سهم مالک 50 و برنده باقی‌مانده را می‌گیرد
+        owner_fee = GAME_OWNER_FEE
+        winner_prize = total - owner_fee
 
-        # سهم مالک 50 DOGS از موجودی ربات
-        owner_fee = OWNER_GAME_FEE
-
-        owner_id = get_owner_id()
-
-        owner = get_user(owner_id)
-
-        # مالک فقط از موجودی خودش 50 می‌گیرد
-        # و این مبلغ از برنده کسر نمی‌شود.
-        if owner and owner["balance"] >= owner_fee:
-
-            execute(
-                """
-                UPDATE users
-                SET balance=balance-?
-                WHERE id=? AND balance>=?
-                """,
-                (
-                    owner_fee,
-                    owner_id,
-                    owner_fee,
-                ),
-            )
-
-            execute(
-                """
-                INSERT INTO transactions
-                (
-                    user_id,
-                    type,
-                    amount,
-                    description,
-                    created_at
-                )
-                VALUES (?,?,?,?,?)
-                """,
-                (
-                    owner_id,
-                    "game_owner_fee",
-                    -owner_fee,
-                    f"Game #{game_id} owner fee",
-                    datetime.now().isoformat(),
-                ),
-            )
-
-        else:
-
-            # اگر مالک 50 DOGS موجودی نداشته باشد،
-            # سهم مالک از هیچ بازیکنی گرفته نمی‌شود.
-            owner_fee = 0
-
-        # پرداخت برنده
-        execute(
+        cur.execute(
             """
             UPDATE users
             SET balance=balance+?
             WHERE id=?
             """,
             (
-                winner_reward,
+                winner_prize,
                 winner_id,
             ),
         )
 
-        execute(
+        # 50 DOGS سهم مالک است
+        cur.execute(
+            """
+            UPDATE users
+            SET balance=balance+?
+            WHERE id=?
+            """,
+            (
+                owner_fee,
+                get_owner_id(),
+            ),
+        )
+
+        now = datetime.now().isoformat()
+
+        cur.execute(
             """
             INSERT INTO transactions
             (
@@ -2007,13 +1965,13 @@ async def join_game(query, context, game_id):
             (
                 winner_id,
                 "game_win",
-                winner_reward,
+                winner_prize,
                 f"Game #{game_id}",
-                datetime.now().isoformat(),
+                now,
             ),
         )
 
-        execute(
+        cur.execute(
             """
             INSERT INTO transactions
             (
@@ -2030,192 +1988,154 @@ async def join_game(query, context, game_id):
                 "game_loss",
                 -amount,
                 f"Game #{game_id}",
-                datetime.now().isoformat(),
+                now,
             ),
         )
 
-        execute(
+        cur.execute(
             """
-            UPDATE games
-            SET status='finished',
-                winner_id=?,
-                loser_id=?,
-                owner_fee=?,
-                winner_reward=?
-            WHERE id=?
-            AND status='playing'
+            INSERT INTO transactions
+            (
+                user_id,
+                type,
+                amount,
+                description,
+                created_at
+            )
+            VALUES (?,?,?,?,?)
             """,
             (
+                get_owner_id(),
+                "game_fee",
+                owner_fee,
+                f"Game fee #{game_id}",
+                now,
+            ),
+        )
+
+        cur.execute(
+            """
+            UPDATE games
+            SET
+                opponent_id=?,
+                status='finished',
+                winner_id=?,
+                loser_id=?
+            WHERE id=?
+            AND status='waiting'
+            """,
+            (
+                opponent_id,
                 winner_id,
                 loser_id,
-                owner_fee,
-                winner_reward,
                 game_id,
             ),
         )
 
-    # -------------------------------
-    # اعلام فوری در گروه
-    # -------------------------------
+        if cur.rowcount != 1:
+            db.rollback()
+            return False
 
-    winner = get_user(winner_id)
-    loser = get_user(loser_id)
+        db.commit()
 
-    result_text = (
-        "🎮 بازی تمام شد!\n\n"
-        f"💰 مبلغ بازی: {amount:,} DOGS\n"
-        f"👤 بازیکن ۱: {user_name(creator)}\n"
-        f"👤 بازیکن ۲: {user_name(player2)}\n\n"
-        f"🏆 برنده: {user_name(winner)}\n"
-        f"🎁 جایزه برنده: {winner_reward:,} DOGS\n"
-        f"💸 سهم مالک: {owner_fee:,} DOGS\n\n"
-        "⚡ نتیجه فوری اعلام شد."
-    )
-
+    # اطلاع گروه
     try:
 
-        await query.edit_message_text(
-            result_text
+        await context.bot.edit_message_text(
+            chat_id=game["chat_id"],
+            message_id=game["message_id"],
+            text=(
+                "🎮 بازی انجام شد!\n\n"
+                f"💰 مبلغ بازی: {amount:,} DOGS\n"
+                f"🏆 برنده: {winner_id}\n"
+                f"❌ بازنده: {loser_id}\n\n"
+                f"🎁 جایزه برنده: {winner_prize:,} DOGS\n"
+                f"👑 سهم مالک: {owner_fee:,} DOGS"
+            ),
         )
 
     except Exception:
-
         try:
-
-            await context.bot.send_message(
+            await context.bot.edit_message_reply_markup(
                 chat_id=game["chat_id"],
-                text=result_text,
+                message_id=game["message_id"],
+                reply_markup=None,
             )
-
         except Exception:
             pass
 
-    await query.answer(
-        "🎮 بازی شروع و نتیجه مشخص شد!",
-        show_alert=False,
-    )
-
-    # -------------------------------
-    # پیوی برنده
-    # -------------------------------
-
+    # پیام خصوصی برنده
     try:
 
         await context.bot.send_message(
             chat_id=winner_id,
             text=(
                 "🏆 شما برنده بازی شدید!\n\n"
-                f"💰 مبلغ بازی: {amount:,} DOGS\n"
-                f"🎁 جایزه: {winner_reward:,} DOGS\n\n"
-                f"💳 موجودی جدید: "
-                f"{get_user(winner_id)['balance']:,} DOGS"
+                f"💰 مبلغ ورود: {amount:,} DOGS\n"
+                f"🎁 جایزه: {winner_prize:,} DOGS"
             ),
         )
 
     except Exception:
         pass
 
-    # -------------------------------
-    # پیوی بازنده
-    # -------------------------------
-
+    # پیام خصوصی بازنده
     try:
 
         await context.bot.send_message(
             chat_id=loser_id,
             text=(
-                "😔 شما بازی را باختید.\n\n"
-                f"💰 مبلغ بازی: {amount:,} DOGS\n"
-                f"🏆 برنده: {user_name(winner)}\n\n"
-                f"💳 موجودی جدید: "
-                f"{get_user(loser_id)['balance']:,} DOGS"
+                "❌ شما بازی را باختید.\n\n"
+                f"💰 مبلغ بازی: {amount:,} DOGS"
             ),
         )
 
     except Exception:
         pass
 
-
-async def cancel_game(query, context, game_id):
-
-    game = execute(
-        "SELECT * FROM games WHERE id=?",
-        (game_id,),
-        fetchone=True,
-    )
-
-    if not game:
-
-        await query.answer(
-            "❌ بازی پیدا نشد.",
-            show_alert=True,
-        )
-
-        return
-
-    if game["status"] != "waiting":
-
-        await query.answer(
-            "❌ بازی قابل لغو نیست.",
-            show_alert=True,
-        )
-
-        return
-
-    if query.from_user.id != game["creator_id"]:
-
-        await query.answer(
-            "⛔ فقط سازنده بازی می‌تواند لغو کند.",
-            show_alert=True,
-        )
-
-        return
-
-    execute(
-        """
-        UPDATE games
-        SET status='cancelled'
-        WHERE id=?
-        AND status='waiting'
-        """,
-        (game_id,),
-    )
-
-    # برگرداندن مبلغ رزرو شده
-    execute(
-        """
-        UPDATE users
-        SET balance=balance+?
-        WHERE id=?
-        """,
-        (
-            game["amount"],
-            game["creator_id"],
-        ),
-    )
-
+    # اطلاع مالک
     try:
 
-        await query.edit_message_text(
-            "❌ بازی لغو شد.\n\n"
-            f"💰 {game['amount']:,} DOGS به موجودی سازنده برگشت."
+        await context.bot.send_message(
+            chat_id=get_owner_id(),
+            text=(
+                "🎮 بازی جدید تمام شد.\n\n"
+                f"🆔 بازی: #{game_id}\n"
+                f"🏆 برنده: {winner_id}\n"
+                f"❌ بازنده: {loser_id}\n"
+                f"👑 سهم مالک: {owner_fee:,} DOGS"
+            ),
         )
 
     except Exception:
         pass
 
-    await query.answer(
-        "بازی لغو شد."
-    )
+    return True
 
 
 # =========================================================
-# GAME CALLBACK
+# CALLBACKS
 # =========================================================
 
-async def game_callback(query, context):
+async def callback_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    data = query.data
+    query = update.callback_query
+
+    # اول جواب callback تا دکمه گیر نکند
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    user_id = query.from_user.id
+    data = query.data or ""
+
+    # =====================================================
+    # GAME JOIN
+    # =====================================================
 
     if data.startswith("game_join:"):
 
@@ -2223,22 +2143,86 @@ async def game_callback(query, context):
             game_id = int(
                 data.split(":", 1)[1]
             )
-        except Exception:
+        except ValueError:
+            return
 
+        user = get_user(user_id)
+
+        if not user or not user["verified"]:
             await query.answer(
-                "❌ درخواست نامعتبر.",
+                "🔐 ابتدا شماره خود را در خصوصی تأیید کنید.",
+                show_alert=True,
+            )
+            return
+
+        if user["blocked"]:
+            await query.answer(
+                "🚫 حساب شما مسدود است.",
+                show_alert=True,
+            )
+            return
+
+        if not bot_enabled():
+            await query.answer(
+                "🔴 ربات خاموش است و موجودی کسر نمی‌شود.",
+                show_alert=True,
+            )
+            return
+
+        game = execute(
+            """
+            SELECT * FROM games
+            WHERE id=?
+            """,
+            (game_id,),
+            fetchone=True,
+        )
+
+        if not game:
+            await query.answer(
+                "❌ بازی پیدا نشد.",
+                show_alert=True,
+            )
+            return
+
+        if game["status"] != "waiting":
+            await query.answer(
+                "❌ این بازی قبلاً وارد شده یا تمام شده.",
+                show_alert=True,
+            )
+            return
+
+        if game["creator_id"] == user_id:
+            await query.answer(
+                "❌ نمی‌توانید وارد بازی خودتان شوید.",
+                show_alert=True,
+            )
+            return
+
+        if user["balance"] < game["amount"]:
+            await query.answer(
+                "❌ موجودی شما کافی نیست.",
+                show_alert=True,
+            )
+            return
+
+        success = await finish_game(
+            game_id,
+            user_id,
+            context,
+        )
+
+        if not success:
+            await query.answer(
+                "❌ بازی دیگر قابل ورود نیست یا موجودی کافی نیست.",
                 show_alert=True,
             )
 
-            return
-
-        await join_game(
-            query,
-            context,
-            game_id,
-        )
-
         return
+
+    # =====================================================
+    # GAME CANCEL
+    # =====================================================
 
     if data.startswith("game_cancel:"):
 
@@ -2246,89 +2230,95 @@ async def game_callback(query, context):
             game_id = int(
                 data.split(":", 1)[1]
             )
-        except Exception:
-
-            await query.answer(
-                "❌ درخواست نامعتبر.",
-                show_alert=True,
-            )
-
+        except ValueError:
             return
 
-        await cancel_game(
-            query,
-            context,
-            game_id,
+        game = execute(
+            """
+            SELECT * FROM games
+            WHERE id=?
+            """,
+            (game_id,),
+            fetchone=True,
         )
 
-        return
+        if not game:
+            await query.answer(
+                "❌ بازی پیدا نشد.",
+                show_alert=True,
+            )
+            return
 
+        if game["creator_id"] != user_id:
+            await query.answer(
+                "⛔ فقط سازنده می‌تواند بازی را لغو کند.",
+                show_alert=True,
+            )
+            return
 
-# =========================================================
-# ADMIN
-# =========================================================
+        with db_lock:
 
-async def admin_panel(update, context):
+            cur = db.cursor()
 
-    user = create_or_update_user(
-        update.effective_user
-    )
+            cur.execute(
+                """
+                UPDATE games
+                SET status='cancelled'
+                WHERE id=?
+                AND status='waiting'
+                """,
+                (game_id,),
+            )
 
-    if user["id"] != get_owner_id():
+            if cur.rowcount != 1:
+                db.rollback()
 
-        await update.message.reply_text(
-            "⛔ دسترسی ندارید."
-        )
+                await query.answer(
+                    "❌ بازی قبلاً لغو یا وارد شده.",
+                    show_alert=True,
+                )
+                return
 
-        return
+            cur.execute(
+                """
+                UPDATE users
+                SET balance=balance+?
+                WHERE id=?
+                """,
+                (
+                    game["amount"],
+                    user_id,
+                ),
+            )
 
-    await update.message.reply_text(
-        "🛠 پنل مدیریت\n\n"
-        "مدیریت کامل ربات:",
-        reply_markup=admin_keyboard(),
-    )
+            cur.execute(
+                """
+                INSERT INTO transactions
+                (
+                    user_id,
+                    type,
+                    amount,
+                    description,
+                    created_at
+                )
+                VALUES (?,?,?,?,?)
+                """,
+                (
+                    user_id,
+                    "game_cancel",
+                    game["amount"],
+                    f"Game #{game_id}",
+                    datetime.now().isoformat(),
+                ),
+            )
 
-
-def admin_only(user_id):
-    return user_id == get_owner_id()
-
-
-# =========================================================
-# ADMIN CALLBACK
-# =========================================================
-
-async def admin_callback(query, context):
-
-    user_id = query.from_user.id
-
-    if not admin_only(user_id):
-
-        await query.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-
-        return
-
-    data = query.data
-
-    # روشن خاموش
-    if data == "admin_toggle_bot":
-
-        new_status = not bot_enabled()
-
-        set_bot_enabled(new_status)
-
-        await query.answer(
-            "🟢 ربات روشن شد."
-            if new_status
-            else "🔴 ربات خاموش شد."
-        )
+            db.commit()
 
         try:
 
-            await query.edit_message_reply_markup(
-                reply_markup=admin_keyboard()
+            await query.edit_message_text(
+                "❌ بازی لغو شد.\n\n"
+                f"💰 {game['amount']:,} DOGS به موجودی سازنده برگشت."
             )
 
         except Exception:
@@ -2336,14 +2326,355 @@ async def admin_callback(query, context):
 
         return
 
+    # =====================================================
+    # OWNER ONLY CALLBACKS
+    # =====================================================
+
+    if not admin_only(user_id):
+
+        await query.answer(
+            "⛔ دسترسی ندارید.",
+            show_alert=True,
+        )
+        return
+
+    # =====================================================
+    # TOGGLE BOT
+    # =====================================================
+
+    if data == "admin_toggle_bot":
+
+        new_status = not bot_enabled()
+
+        set_bot_enabled(new_status)
+
+        status = (
+            "🟢 ربات روشن شد."
+            if new_status
+            else "🔴 ربات خاموش شد.\n\n"
+            "هیچ موجودی در حالت خاموش کسر نمی‌شود."
+        )
+
+        try:
+            await query.edit_message_text(
+                status,
+                reply_markup=admin_keyboard(),
+            )
+        except Exception:
+            await query.message.reply_text(
+                status,
+                reply_markup=admin_keyboard(),
+            )
+
+        return
+
+    # =====================================================
+    # DEPOSIT APPROVE / REJECT
+    # =====================================================
+
+    if data.startswith("deposit_"):
+
+        try:
+            action, id_text = data.split(":")
+            deposit_id = int(id_text)
+        except Exception:
+            return
+
+        deposit = execute(
+            """
+            SELECT * FROM deposits
+            WHERE id=?
+            """,
+            (deposit_id,),
+            fetchone=True,
+        )
+
+        if not deposit:
+            await query.answer(
+                "❌ درخواست پیدا نشد.",
+                show_alert=True,
+            )
+            return
+
+        # ضد دوبار کلیک
+        if deposit["status"] != "pending":
+            await query.answer(
+                "⚠️ این درخواست قبلاً بررسی شده.",
+                show_alert=True,
+            )
+            return
+
+        if action == "deposit_approve":
+
+            with db_lock:
+
+                cur = db.cursor()
+
+                cur.execute(
+                    """
+                    UPDATE deposits
+                    SET status='approved'
+                    WHERE id=?
+                    AND status='pending'
+                    """,
+                    (deposit_id,),
+                )
+
+                if cur.rowcount != 1:
+                    db.rollback()
+
+                    await query.answer(
+                        "⚠️ قبلاً بررسی شده.",
+                        show_alert=True,
+                    )
+                    return
+
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET balance=balance+?
+                    WHERE id=?
+                    """,
+                    (
+                        deposit["amount"],
+                        deposit["user_id"],
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO transactions
+                    (
+                        user_id,
+                        type,
+                        amount,
+                        description,
+                        created_at
+                    )
+                    VALUES (?,?,?,?,?)
+                    """,
+                    (
+                        deposit["user_id"],
+                        "deposit",
+                        deposit["amount"],
+                        f"Deposit #{deposit_id}",
+                        datetime.now().isoformat(),
+                    ),
+                )
+
+                db.commit()
+
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=None
+                )
+            except Exception:
+                pass
+
+            try:
+
+                await context.bot.send_message(
+                    chat_id=deposit["user_id"],
+                    text=(
+                        "✅ واریزی شما تأیید شد.\n\n"
+                        f"💰 {deposit['amount']:,} DOGS"
+                    ),
+                )
+
+            except Exception:
+                pass
+
+        else:
+
+            with db_lock:
+
+                cur = db.cursor()
+
+                cur.execute(
+                    """
+                    UPDATE deposits
+                    SET status='rejected'
+                    WHERE id=?
+                    AND status='pending'
+                    """,
+                    (deposit_id,),
+                )
+
+                if cur.rowcount != 1:
+                    db.rollback()
+
+                    await query.answer(
+                        "⚠️ قبلاً بررسی شده.",
+                        show_alert=True,
+                    )
+                    return
+
+                db.commit()
+
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=None
+                )
+            except Exception:
+                pass
+
+            try:
+
+                await context.bot.send_message(
+                    chat_id=deposit["user_id"],
+                    text=(
+                        "❌ واریزی شما رد شد.\n\n"
+                        f"💰 {deposit['amount']:,} DOGS"
+                    ),
+                )
+
+            except Exception:
+                pass
+
+        return
+
+    # =====================================================
+    # WITHDRAW APPROVE / REJECT
+    # =====================================================
+
+    if data.startswith("withdraw_"):
+
+        try:
+            action, id_text = data.split(":")
+            withdrawal_id = int(id_text)
+        except Exception:
+            return
+
+        withdrawal = execute(
+            """
+            SELECT * FROM withdrawals
+            WHERE id=?
+            """,
+            (withdrawal_id,),
+            fetchone=True,
+        )
+
+        if not withdrawal:
+            await query.answer(
+                "❌ درخواست پیدا نشد.",
+                show_alert=True,
+            )
+            return
+
+        if withdrawal["status"] != "pending":
+            await query.answer(
+                "⚠️ قبلاً بررسی شده.",
+                show_alert=True,
+            )
+            return
+
+        if action == "withdraw_approve":
+
+            execute(
+                """
+                UPDATE withdrawals
+                SET status='approved'
+                WHERE id=?
+                AND status='pending'
+                """,
+                (withdrawal_id,),
+            )
+
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=None
+                )
+            except Exception:
+                pass
+
+            try:
+
+                await context.bot.send_message(
+                    chat_id=withdrawal["user_id"],
+                    text=(
+                        "✅ برداشت شما تأیید شد.\n\n"
+                        f"💰 {withdrawal['amount']:,} DOGS\n"
+                        f"📍 مقصد: {withdrawal['destination']}"
+                    ),
+                )
+
+            except Exception:
+                pass
+
+        else:
+
+            with db_lock:
+
+                cur = db.cursor()
+
+                cur.execute(
+                    """
+                    UPDATE withdrawals
+                    SET status='rejected'
+                    WHERE id=?
+                    AND status='pending'
+                    """,
+                    (withdrawal_id,),
+                )
+
+                if cur.rowcount != 1:
+                    db.rollback()
+
+                    await query.answer(
+                        "⚠️ قبلاً بررسی شده.",
+                        show_alert=True,
+                    )
+                    return
+
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET balance=balance+?
+                    WHERE id=?
+                    """,
+                    (
+                        withdrawal["amount"],
+                        withdrawal["user_id"],
+                    ),
+                )
+
+                db.commit()
+
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=None
+                )
+            except Exception:
+                pass
+
+            try:
+
+                await context.bot.send_message(
+                    chat_id=withdrawal["user_id"],
+                    text=(
+                        "❌ برداشت شما رد شد.\n\n"
+                        f"💰 {withdrawal['amount']:,} DOGS "
+                        "به موجودی شما برگشت."
+                    ),
+                )
+
+            except Exception:
+                pass
+
+        return
+
+    # =====================================================
+    # ADMIN ACTIONS
+    # =====================================================
+
     if data == "admin_transfer_owner":
 
         context.user_data.clear()
-
         context.user_data["state"] = "admin_transfer_owner"
 
         await query.message.reply_text(
-            "👑 آیدی عددی مالک جدید را ارسال کنید."
+            "👑 آیدی عددی مالک جدید را ارسال کنید.",
+            reply_markup=cancel_keyboard(),
         )
 
         return
@@ -2351,13 +2682,12 @@ async def admin_callback(query, context):
     if data == "admin_add_balance":
 
         context.user_data.clear()
-
         context.user_data["state"] = "admin_add_balance"
 
         await query.message.reply_text(
-            "➕ شارژ موجودی\n\n"
-            "فرمت:\n"
-            "123456789 5000"
+            "➕ فرمت:\n\n"
+            "123456789 5000",
+            reply_markup=cancel_keyboard(),
         )
 
         return
@@ -2365,13 +2695,12 @@ async def admin_callback(query, context):
     if data == "admin_remove_balance":
 
         context.user_data.clear()
-
         context.user_data["state"] = "admin_remove_balance"
 
         await query.message.reply_text(
-            "➖ کسر موجودی\n\n"
-            "فرمت:\n"
-            "123456789 5000"
+            "➖ فرمت:\n\n"
+            "123456789 5000",
+            reply_markup=cancel_keyboard(),
         )
 
         return
@@ -2379,13 +2708,12 @@ async def admin_callback(query, context):
     if data == "admin_referral_reward":
 
         context.user_data.clear()
-
         context.user_data["state"] = "admin_referral_reward"
 
         await query.message.reply_text(
-            f"🎁 جایزه فعلی: "
-            f"{get_referral_reward():,} DOGS\n\n"
-            "مقدار جدید را وارد کنید:"
+            f"🎁 جایزه فعلی: {get_referral_reward():,} DOGS\n\n"
+            "مقدار جدید را وارد کنید:",
+            reply_markup=cancel_keyboard(),
         )
 
         return
@@ -2393,11 +2721,11 @@ async def admin_callback(query, context):
     if data == "admin_block":
 
         context.user_data.clear()
-
         context.user_data["state"] = "admin_block"
 
         await query.message.reply_text(
-            "🚫 آیدی کاربر را ارسال کنید:"
+            "🚫 آیدی کاربر را وارد کنید:",
+            reply_markup=cancel_keyboard(),
         )
 
         return
@@ -2405,40 +2733,44 @@ async def admin_callback(query, context):
     if data == "admin_broadcast":
 
         context.user_data.clear()
-
         context.user_data["state"] = "admin_broadcast"
 
         await query.message.reply_text(
-            "📢 پیام همگانی را ارسال کنید."
+            "📢 پیام همگانی را ارسال کنید.",
+            reply_markup=cancel_keyboard(),
         )
 
         return
 
+    # =====================================================
+    # ADMIN BALANCES
+    # =====================================================
+
     if data == "admin_balances":
 
-        rows = execute(
+        users = execute(
             """
             SELECT * FROM users
             ORDER BY balance DESC
+            LIMIT 100
             """,
             fetchall=True,
         )
 
-        if not rows:
-
+        if not users:
             await query.message.reply_text(
                 "هیچ کاربری وجود ندارد."
             )
-
             return
 
-        text = "👥 موجودی کاربران\n\n"
+        text = "👥 کاربران\n\n"
 
-        for u in rows:
+        for u in users:
 
             line = (
-                f"👤 {user_name(u)}\n"
+                f"👤 {u['first_name'] or '-'}\n"
                 f"🔢 {u['id']}\n"
+                f"📱 {user_name(u)}\n"
                 f"💰 {u['balance']:,} DOGS\n\n"
             )
 
@@ -2462,6 +2794,10 @@ async def admin_callback(query, context):
 
         return
 
+    # =====================================================
+    # ADMIN DEPOSITS
+    # =====================================================
+
     if data == "admin_deposits":
 
         rows = execute(
@@ -2481,7 +2817,7 @@ async def admin_callback(query, context):
 
             return
 
-        text = "💰 آخرین واریزی‌ها\n\n"
+        text = "💰 واریزی‌های اخیر\n\n"
 
         for d in rows:
 
@@ -2489,12 +2825,16 @@ async def admin_callback(query, context):
                 f"#{d['id']} | "
                 f"{d['amount']:,} | "
                 f"{d['status']} | "
-                f"{d['user_id']}\n"
+                f"ID {d['user_id']}\n"
             )
 
         await query.message.reply_text(text)
 
         return
+
+    # =====================================================
+    # ADMIN WITHDRAWALS
+    # =====================================================
 
     if data == "admin_withdrawals":
 
@@ -2515,7 +2855,7 @@ async def admin_callback(query, context):
 
             return
 
-        text = "💸 آخرین برداشت‌ها\n\n"
+        text = "💸 برداشت‌های اخیر\n\n"
 
         for w in rows:
 
@@ -2523,24 +2863,42 @@ async def admin_callback(query, context):
                 f"#{w['id']} | "
                 f"{w['amount']:,} | "
                 f"{w['status']} | "
-                f"{w['user_id']}\n"
+                f"ID {w['user_id']}\n"
             )
 
         await query.message.reply_text(text)
 
         return
 
+    # =====================================================
+    # ADMIN STATS
+    # =====================================================
+
     if data == "admin_stats":
 
         users = execute(
-            "SELECT COUNT(*) AS c FROM users",
+            """
+            SELECT COUNT(*) AS c
+            FROM users
+            """,
             fetchone=True,
         )["c"]
 
-        total = execute(
-            "SELECT COALESCE(SUM(balance),0) AS s FROM users",
+        total_balance = execute(
+            """
+            SELECT COALESCE(SUM(balance),0) AS s
+            FROM users
+            """,
             fetchone=True,
         )["s"]
+
+        refs = execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM referrals
+            """,
+            fetchone=True,
+        )["c"]
 
         games = execute(
             """
@@ -2551,99 +2909,29 @@ async def admin_callback(query, context):
             fetchone=True,
         )["c"]
 
-        refs = execute(
-            "SELECT COUNT(*) AS c FROM referrals",
-            fetchone=True,
-        )["c"]
-
         await query.message.reply_text(
-            "📊 آمار\n\n"
+            "📊 آمار ربات\n\n"
             f"👥 کاربران: {users}\n"
-            f"💰 مجموع موجودی: {total:,} DOGS\n"
+            f"💰 مجموع موجودی: {total_balance:,} DOGS\n"
+            f"👥 رفرال: {refs}\n"
             f"🎮 بازی‌های انجام‌شده: {games}\n"
-            f"👥 رفرال‌ها: {refs}\n"
-            f"🎁 جایزه رفرال: "
-            f"{get_referral_reward():,} DOGS\n"
-            f"💸 سهم مالک هر بازی: "
-            f"{OWNER_GAME_FEE} DOGS"
+            f"🎁 جایزه رفرال: {get_referral_reward():,} DOGS\n"
+            f"🤖 وضعیت: {'روشن' if bot_enabled() else 'خاموش'}"
         )
 
         return
 
 
 # =========================================================
-# SUPPORT REPLY
+# ADMIN TEXT STATES
 # =========================================================
 
-async def support_reply_start(query, context):
+async def admin_state_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    if not admin_only(query.from_user.id):
-
-        await query.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-
-        return
-
-    try:
-
-        support_id = int(
-            query.data.split(":", 1)[1]
-        )
-
-    except Exception:
-
-        await query.answer(
-            "❌ درخواست نامعتبر.",
-            show_alert=True,
-        )
-
-        return
-
-    support = execute(
-        """
-        SELECT * FROM support_messages
-        WHERE id=?
-        """,
-        (support_id,),
-        fetchone=True,
-    )
-
-    if not support:
-
-        await query.answer(
-            "❌ پیام پیدا نشد.",
-            show_alert=True,
-        )
-
-        return
-
-    context.user_data.clear()
-
-    context.user_data["state"] = "support_reply"
-    context.user_data["support_user_id"] = support["user_id"]
-    context.user_data["support_id"] = support_id
-
-    await query.message.reply_text(
-        "💬 پاسخ خود را ارسال کنید:"
-    )
-
-    await query.answer()
-
-
-# =========================================================
-# ADMIN STATES
-# =========================================================
-
-async def admin_state_handler(update, context):
-
-    user = get_user(update.effective_user.id)
-
-    if not user:
-        return False
-
-    if user["id"] != get_owner_id():
+    if not admin_only(update.effective_user.id):
         return False
 
     state = context.user_data.get("state")
@@ -2651,94 +2939,14 @@ async def admin_state_handler(update, context):
     if not state:
         return False
 
-    # -------------------------
-    # Support reply
-    # -------------------------
+    if not update.message.text:
+        return False
 
-    if state == "support_reply":
+    text = update.message.text.strip()
 
-        target_id = context.user_data.get(
-            "support_user_id"
-        )
-
-        if not target_id:
-            context.user_data.clear()
-            return True
-
-        try:
-
-            await context.bot.copy_message(
-                chat_id=target_id,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.message.message_id,
-            )
-
-            await update.message.reply_text(
-                "✅ پاسخ برای کاربر ارسال شد."
-            )
-
-            execute(
-                """
-                UPDATE support_messages
-                SET status='answered'
-                WHERE id=?
-                """,
-                (
-                    context.user_data.get(
-                        "support_id"
-                    ),
-                ),
-            )
-
-        except Exception as e:
-
-            await update.message.reply_text(
-                f"❌ ارسال پاسخ انجام نشد.\n{e}"
-            )
-
-        context.user_data.clear()
-
-        return True
-
-    text = (
-        update.message.text.strip()
-        if update.message.text
-        else ""
-    )
-
-    # -------------------------
-    # Referral
-    # -------------------------
-
-    if state == "admin_referral_reward":
-
-        if not text.isdigit():
-
-            await update.message.reply_text(
-                "❌ فقط عدد وارد کنید."
-            )
-
-            return True
-
-        amount = int(text)
-
-        set_referral_reward(amount)
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"✅ جایزه زیرمجموعه تغییر کرد:\n"
-            f"{amount:,} DOGS",
-            reply_markup=main_keyboard(
-                user["id"]
-            ),
-        )
-
-        return True
-
-    # -------------------------
-    # Owner transfer
-    # -------------------------
+    # -----------------------------------------------------
+    # انتقال مالکیت
+    # -----------------------------------------------------
 
     if state == "admin_transfer_owner":
 
@@ -2752,12 +2960,10 @@ async def admin_state_handler(update, context):
 
         new_owner = int(text)
 
-        target = get_user(new_owner)
-
-        if not target:
+        if not get_user(new_owner):
 
             await update.message.reply_text(
-                "❌ کاربر ابتدا باید /start بزند."
+                "❌ این کاربر هنوز ربات را شروع نکرده است."
             )
 
             return True
@@ -2769,8 +2975,9 @@ async def admin_state_handler(update, context):
         context.user_data.clear()
 
         await update.message.reply_text(
-            f"👑 مالکیت منتقل شد.\n\n"
-            f"مالک جدید: {new_owner}"
+            "👑 مالکیت منتقل شد.\n\n"
+            f"مالک جدید: {new_owner}",
+            reply_markup=main_keyboard(new_owner),
         )
 
         try:
@@ -2778,11 +2985,10 @@ async def admin_state_handler(update, context):
             await context.bot.send_message(
                 chat_id=new_owner,
                 text=(
-                    "👑 شما مالک جدید ربات شدید."
+                    "👑 شما مالک جدید ربات شدید.\n\n"
+                    "پنل مدیریت برای شما فعال شد."
                 ),
-                reply_markup=main_keyboard(
-                    new_owner
-                ),
+                reply_markup=main_keyboard(new_owner),
             )
 
         except Exception:
@@ -2796,25 +3002,128 @@ async def admin_state_handler(update, context):
 
         return True
 
-    # -------------------------
-    # Add / remove
-    # -------------------------
+    # -----------------------------------------------------
+    # شارژ موجودی
+    # -----------------------------------------------------
 
-    if state in (
-        "admin_add_balance",
-        "admin_remove_balance",
-    ):
+    if state == "admin_add_balance":
 
         parts = text.split()
 
-        if (
-            len(parts) != 2
-            or not parts[0].isdigit()
-            or not parts[1].isdigit()
-        ):
+        if len(parts) != 2:
 
             await update.message.reply_text(
-                "❌ فرمت:\n123456789 5000"
+                "❌ فرمت صحیح:\n123456789 5000"
+            )
+
+            return True
+
+        if not parts[0].isdigit() or not parts[1].isdigit():
+
+            await update.message.reply_text(
+                "❌ ID و مبلغ باید عدد باشند."
+            )
+
+            return True
+
+        target_id = int(parts[0])
+        amount = int(parts[1])
+
+        if amount <= 0:
+
+            await update.message.reply_text(
+                "❌ مبلغ نامعتبر است."
+            )
+
+            return True
+
+        target = get_user(target_id)
+
+        if not target:
+
+            await update.message.reply_text(
+                "❌ کاربر پیدا نشد."
+            )
+
+            return True
+
+        execute(
+            """
+            UPDATE users
+            SET balance=balance+?
+            WHERE id=?
+            """,
+            (
+                amount,
+                target_id,
+            ),
+        )
+
+        execute(
+            """
+            INSERT INTO transactions
+            (
+                user_id,
+                type,
+                amount,
+                description,
+                created_at
+            )
+            VALUES (?,?,?,?,?)
+            """,
+            (
+                target_id,
+                "admin_add",
+                amount,
+                "Admin balance add",
+                datetime.now().isoformat(),
+            ),
+        )
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ {amount:,} DOGS به کاربر {target_id} اضافه شد.",
+            reply_markup=main_keyboard(
+                update.effective_user.id
+            ),
+        )
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=(
+                    "💰 موجودی شما توسط مالک افزایش یافت.\n\n"
+                    f"➕ {amount:,} DOGS"
+                ),
+            )
+
+        except Exception:
+            pass
+
+        return True
+
+    # -----------------------------------------------------
+    # کسر موجودی
+    # -----------------------------------------------------
+
+    if state == "admin_remove_balance":
+
+        parts = text.split()
+
+        if len(parts) != 2:
+
+            await update.message.reply_text(
+                "❌ فرمت صحیح:\n123456789 5000"
+            )
+
+            return True
+
+        if not parts[0].isdigit() or not parts[1].isdigit():
+
+            await update.message.reply_text(
+                "❌ ID و مبلغ باید عدد باشند."
             )
 
             return True
@@ -2840,85 +3149,63 @@ async def admin_state_handler(update, context):
 
             return True
 
-        if state == "admin_add_balance":
+        with db_lock:
 
-            execute(
-                """
-                UPDATE users
-                SET balance=balance+?
-                WHERE id=?
-                """,
-                (
-                    amount,
-                    target_id,
-                ),
-            )
+            cur = db.cursor()
 
-            transaction_amount = amount
-            transaction_type = "admin_add"
-
-            msg = (
-                f"✅ {amount:,} DOGS به کاربر "
-                f"{target_id} اضافه شد."
-            )
-
-        else:
-
-            if target["balance"] < amount:
-
-                await update.message.reply_text(
-                    "❌ موجودی کافی نیست."
-                )
-
-                return True
-
-            execute(
+            cur.execute(
                 """
                 UPDATE users
                 SET balance=balance-?
                 WHERE id=?
+                AND balance>=?
                 """,
                 (
                     amount,
                     target_id,
+                    amount,
                 ),
             )
 
-            transaction_amount = -amount
-            transaction_type = "admin_remove"
+            if cur.rowcount != 1:
 
-            msg = (
-                f"✅ {amount:,} DOGS از کاربر "
-                f"{target_id} کم شد."
+                db.rollback()
+
+                await update.message.reply_text(
+                    "❌ موجودی کاربر کافی نیست."
+                )
+
+                return True
+
+            cur.execute(
+                """
+                INSERT INTO transactions
+                (
+                    user_id,
+                    type,
+                    amount,
+                    description,
+                    created_at
+                )
+                VALUES (?,?,?,?,?)
+                """,
+                (
+                    target_id,
+                    "admin_remove",
+                    -amount,
+                    "Admin balance remove",
+                    datetime.now().isoformat(),
+                ),
             )
 
-        execute(
-            """
-            INSERT INTO transactions
-            (
-                user_id,
-                type,
-                amount,
-                description,
-                created_at
-            )
-            VALUES (?,?,?,?,?)
-            """,
-            (
-                target_id,
-                transaction_type,
-                transaction_amount,
-                "Admin balance change",
-                datetime.now().isoformat(),
-            ),
-        )
+            db.commit()
 
         context.user_data.clear()
 
         await update.message.reply_text(
-            msg,
+            f"✅ {amount:,} DOGS از کاربر {target_id} کسر شد.",
             reply_markup=main_keyboard(
-                user["id"]
+                update.effective_user.id
             ),
         )
 
@@ -2926,7 +3213,10 @@ async def admin_state_handler(update, context):
 
             await context.bot.send_message(
                 chat_id=target_id,
-                text=msg,
+                text=(
+                    "💰 موجودی شما توسط مالک کاهش یافت.\n\n"
+                    f"➖ {amount:,} DOGS"
+                ),
             )
 
         except Exception:
@@ -2934,9 +3224,47 @@ async def admin_state_handler(update, context):
 
         return True
 
-    # -------------------------
-    # Block
-    # -------------------------
+    # -----------------------------------------------------
+    # جایزه رفرال
+    # -----------------------------------------------------
+
+    if state == "admin_referral_reward":
+
+        if not text.isdigit():
+
+            await update.message.reply_text(
+                "❌ فقط عدد وارد کنید."
+            )
+
+            return True
+
+        amount = int(text)
+
+        if amount < 0:
+
+            await update.message.reply_text(
+                "❌ مقدار نامعتبر است."
+            )
+
+            return True
+
+        set_referral_reward(amount)
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            f"✅ جایزه زیرمجموعه تغییر کرد.\n\n"
+            f"🎁 {amount:,} DOGS",
+            reply_markup=main_keyboard(
+                update.effective_user.id
+            ),
+        )
+
+        return True
+
+    # -----------------------------------------------------
+    # مسدود / آزاد
+    # -----------------------------------------------------
 
     if state == "admin_block":
 
@@ -2960,11 +3288,7 @@ async def admin_state_handler(update, context):
 
             return True
 
-        new_status = (
-            0
-            if target["blocked"]
-            else 1
-        )
+        new_status = 0 if target["blocked"] else 1
 
         execute(
             """
@@ -2980,19 +3304,24 @@ async def admin_state_handler(update, context):
 
         context.user_data.clear()
 
+        status = (
+            "مسدود شد"
+            if new_status
+            else "آزاد شد"
+        )
+
         await update.message.reply_text(
-            "✅ کاربر "
-            f"{'مسدود شد' if new_status else 'آزاد شد'}.",
+            f"✅ کاربر {target_id} {status}.",
             reply_markup=main_keyboard(
-                user["id"]
+                update.effective_user.id
             ),
         )
 
         return True
 
-    # -------------------------
+    # -----------------------------------------------------
     # Broadcast
-    # -------------------------
+    # -----------------------------------------------------
 
     if state == "admin_broadcast":
 
@@ -3005,19 +3334,19 @@ async def admin_state_handler(update, context):
             fetchall=True,
         )
 
-        sent = 0
+        sent_count = 0
 
-        for target in users:
+        for u in users:
 
             try:
 
                 await context.bot.copy_message(
-                    chat_id=target["id"],
+                    chat_id=u["id"],
                     from_chat_id=update.effective_chat.id,
                     message_id=update.message.message_id,
                 )
 
-                sent += 1
+                sent_count += 1
 
             except Exception:
                 pass
@@ -3025,10 +3354,10 @@ async def admin_state_handler(update, context):
         context.user_data.clear()
 
         await update.message.reply_text(
-            f"📢 ارسال شد.\n"
-            f"👥 موفق: {sent}",
+            f"📢 پیام همگانی ارسال شد.\n\n"
+            f"👥 ارسال موفق: {sent_count}",
             reply_markup=main_keyboard(
-                user["id"]
+                update.effective_user.id
             ),
         )
 
@@ -3038,348 +3367,28 @@ async def admin_state_handler(update, context):
 
 
 # =========================================================
-# CALLBACK ROUTER
+# ADMIN PANEL
 # =========================================================
 
-async def callback_router(update, context):
+async def admin_panel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
-    query = update.callback_query
+    if not admin_only(update.effective_user.id):
 
-    data = query.data or ""
-
-    # بازی
-    if data.startswith("game_"):
-
-        await game_callback(
-            query,
-            context,
+        await update.message.reply_text(
+            "⛔ دسترسی ندارید."
         )
 
         return
 
-    # پشتیبانی
-    if data.startswith("support_reply:"):
-
-        await support_reply_start(
-            query,
-            context,
-        )
-
-        return
-
-    # مالک
-    if data.startswith("admin_"):
-
-        await query.answer()
-
-        await admin_callback(
-            query,
-            context,
-        )
-
-        return
-
-    # واریزی / برداشت
-    if data.startswith("deposit_"):
-
-        await deposit_callback(
-            query,
-            context,
-        )
-
-        return
-
-    if data.startswith("withdraw_"):
-
-        await withdrawal_callback(
-            query,
-            context,
-        )
-
-        return
-
-    await query.answer(
-        "❌ دکمه نامعتبر است.",
-        show_alert=True,
-    )
-
-
-# =========================================================
-# DEPOSIT CALLBACK
-# =========================================================
-
-async def deposit_callback(query, context):
-
-    if not admin_only(query.from_user.id):
-
-        await query.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-
-        return
-
-    try:
-
-        action, id_text = query.data.split(":")
-
-        deposit_id = int(id_text)
-
-    except Exception:
-
-        await query.answer(
-            "❌ درخواست نامعتبر.",
-            show_alert=True,
-        )
-
-        return
-
-    deposit = execute(
-        """
-        SELECT * FROM deposits
-        WHERE id=?
-        """,
-        (deposit_id,),
-        fetchone=True,
-    )
-
-    if not deposit:
-
-        await query.answer(
-            "❌ درخواست پیدا نشد.",
-            show_alert=True,
-        )
-
-        return
-
-    if deposit["status"] != "pending":
-
-        await query.answer(
-            "⚠️ این درخواست قبلاً بررسی شده.",
-            show_alert=True,
-        )
-
-        return
-
-    # ضد دوبار کلیک
-    if action == "deposit_approve":
-
-        execute(
-            """
-            UPDATE deposits
-            SET status='approved'
-            WHERE id=?
-            AND status='pending'
-            """,
-            (deposit_id,),
-        )
-
-        execute(
-            """
-            UPDATE users
-            SET balance=balance+?
-            WHERE id=?
-            """,
-            (
-                deposit["amount"],
-                deposit["user_id"],
-            ),
-        )
-
-        execute(
-            """
-            INSERT INTO transactions
-            (
-                user_id,
-                type,
-                amount,
-                description,
-                created_at
-            )
-            VALUES (?,?,?,?,?)
-            """,
-            (
-                deposit["user_id"],
-                "deposit",
-                deposit["amount"],
-                f"Deposit #{deposit_id}",
-                datetime.now().isoformat(),
-            ),
-        )
-
-        text = (
-            "✅ واریزی تأیید شد.\n\n"
-            f"💰 {deposit['amount']:,} DOGS"
-        )
-
-    else:
-
-        execute(
-            """
-            UPDATE deposits
-            SET status='rejected'
-            WHERE id=?
-            AND status='pending'
-            """,
-            (deposit_id,),
-        )
-
-        text = (
-            "❌ واریزی رد شد.\n\n"
-            f"💰 {deposit['amount']:,} DOGS"
-        )
-
-    try:
-
-        await query.edit_message_reply_markup(
-            reply_markup=None
-        )
-
-    except Exception:
-        pass
-
-    try:
-
-        await context.bot.send_message(
-            chat_id=deposit["user_id"],
-            text=text,
-        )
-
-    except Exception:
-        pass
-
-    await query.answer(
-        "انجام شد."
-    )
-
-
-# =========================================================
-# WITHDRAW CALLBACK
-# =========================================================
-
-async def withdrawal_callback(query, context):
-
-    if not admin_only(query.from_user.id):
-
-        await query.answer(
-            "⛔ دسترسی ندارید.",
-            show_alert=True,
-        )
-
-        return
-
-    try:
-
-        action, id_text = query.data.split(":")
-
-        withdrawal_id = int(id_text)
-
-    except Exception:
-
-        await query.answer(
-            "❌ درخواست نامعتبر.",
-            show_alert=True,
-        )
-
-        return
-
-    withdrawal = execute(
-        """
-        SELECT * FROM withdrawals
-        WHERE id=?
-        """,
-        (withdrawal_id,),
-        fetchone=True,
-    )
-
-    if not withdrawal:
-
-        await query.answer(
-            "❌ درخواست پیدا نشد.",
-            show_alert=True,
-        )
-
-        return
-
-    if withdrawal["status"] != "pending":
-
-        await query.answer(
-            "⚠️ قبلاً بررسی شده.",
-            show_alert=True,
-        )
-
-        return
-
-    if action == "withdraw_approve":
-
-        execute(
-            """
-            UPDATE withdrawals
-            SET status='approved'
-            WHERE id=?
-            AND status='pending'
-            """,
-            (withdrawal_id,),
-        )
-
-        text = (
-            "✅ برداشت تأیید شد.\n\n"
-            f"💰 {withdrawal['amount']:,} DOGS\n"
-            f"📍 {withdrawal['destination']}"
-        )
-
-    else:
-
-        execute(
-            """
-            UPDATE withdrawals
-            SET status='rejected'
-            WHERE id=?
-            AND status='pending'
-            """,
-            (withdrawal_id,),
-        )
-
-        # برگشت مبلغ رزرو شده
-        execute(
-            """
-            UPDATE users
-            SET balance=balance+?
-            WHERE id=?
-            """,
-            (
-                withdrawal["amount"],
-                withdrawal["user_id"],
-            ),
-        )
-
-        text = (
-            "❌ برداشت رد شد.\n\n"
-            f"💰 {withdrawal['amount']:,} DOGS "
-            "به موجودی برگشت."
-        )
-
-    try:
-
-        await query.edit_message_reply_markup(
-            reply_markup=None
-        )
-
-    except Exception:
-        pass
-
-    try:
-
-        await context.bot.send_message(
-            chat_id=withdrawal["user_id"],
-            text=text,
-        )
-
-    except Exception:
-        pass
-
-    await query.answer(
-        "انجام شد."
+    context.user_data.clear()
+
+    await update.message.reply_text(
+        "🛠 پنل مدیریت\n\n"
+        "از گزینه‌های زیر استفاده کنید:",
+        reply_markup=admin_keyboard(),
     )
 
 
@@ -3387,7 +3396,10 @@ async def withdrawal_callback(query, context):
 # CANCEL
 # =========================================================
 
-async def cancel(update, context):
+async def cancel(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     user = create_or_update_user(
         update.effective_user
@@ -3395,11 +3407,53 @@ async def cancel(update, context):
 
     context.user_data.clear()
 
+    if not user["verified"]:
+
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
+
+        return
+
     await update.message.reply_text(
-        "❌ لغو شد.",
-        reply_markup=main_keyboard(
-            user["id"]
-        ),
+        "❌ عملیات لغو شد.",
+        reply_markup=main_keyboard(user["id"]),
+    )
+
+
+# =========================================================
+# GROUP BALANCE
+# =========================================================
+
+async def group_balance(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = get_user(
+        update.effective_user.id
+    )
+
+    if not user:
+
+        await update.message.reply_text(
+            "🔐 ابتدا در خصوصی ربات /start را بزنید."
+        )
+
+        return
+
+    if not user["verified"]:
+
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را در خصوصی تأیید کنید."
+        )
+
+        return
+
+    await update.message.reply_text(
+        f"💳 موجودی {user_name(user)}:\n\n"
+        f"💰 {user['balance']:,} DOGS"
     )
 
 
@@ -3407,13 +3461,81 @@ async def cancel(update, context):
 # TEXT ROUTER
 # =========================================================
 
-async def text_router(update, context):
+async def text_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
 
     if not update.message:
         return
 
-    if not update.message.text:
+    if not update.effective_user:
         return
+
+    text = (
+        update.message.text.strip()
+        if update.message.text
+        else ""
+    )
+
+    # =====================================================
+    # GROUP ROUTER
+    # =====================================================
+
+    if update.effective_chat.type in (
+        "group",
+        "supergroup",
+    ):
+
+        # موجودی
+        if text == "موجودی" or text == "💳 موجودی":
+
+            await group_balance(
+                update,
+                context,
+            )
+
+            return
+
+        # انتقال فقط Reply
+        if re.fullmatch(
+            r"\s*انتقال\s+\d+\s*",
+            text,
+        ):
+
+            await transfer_by_reply(
+                update,
+                context,
+            )
+
+            return
+
+        # بازی
+        match = re.fullmatch(
+            r"\s*بازی\s+(\d+)\s*",
+            text,
+        )
+
+        if match:
+
+            amount = int(
+                match.group(1)
+            )
+
+            await create_game(
+                update,
+                context,
+                amount,
+            )
+
+            return
+
+        # هیچ دستور خصوصی در گروه اجرا نمی‌شود
+        return
+
+    # =====================================================
+    # PRIVATE
+    # =====================================================
 
     user = create_or_update_user(
         update.effective_user
@@ -3427,62 +3549,146 @@ async def text_router(update, context):
 
         return
 
-    # لغو
-    if update.message.text.strip() == "❌ لغو":
-
-        await cancel(
-            update,
-            context,
-        )
-
+    # شماره
+    if update.message.contact:
         return
 
-    # تأیید شماره
-    if (
-        update.message.text.strip()
-        == "📱 تأیید شماره"
-    ):
+    # دکمه اصلی همیشه state قبلی را پاک می‌کند
+    # تا مشکل «مبلغ باید عدد باشد» دوباره رخ ندهد.
 
-        await request_verification(
-            update,
-            context,
-        )
+    main_buttons = {
+        "💳 موجودی",
+        "موجودی",
+        "💰 واریزی",
+        "💸 برداشت",
+        "🔄 انتقال",
+        "👥 زیرمجموعه",
+        "🎧 پشتیبانی",
+        "🛠 پنل مدیریت",
+        "❌ لغو",
+    }
 
-        return
+    if text in main_buttons:
 
-    # -------------------------
-    # پیوی: verification
-    # -------------------------
+        # مهم: state قبلی پاک شود
+        context.user_data.clear()
 
-    if update.effective_chat.type == "private":
+        if text in (
+            "💳 موجودی",
+            "موجودی",
+        ):
 
-        if not is_verified(user):
-
-            await request_verification(
+            await balance(
                 update,
                 context,
             )
 
             return
 
-    # -------------------------
-    # Admin states
-    # -------------------------
+        if text == "💰 واریزی":
+
+            await deposit_start(
+                update,
+                context,
+            )
+
+            return
+
+        if text == "💸 برداشت":
+
+            await withdraw_start(
+                update,
+                context,
+            )
+
+            return
+
+        if text == "🔄 انتقال":
+
+            await update.message.reply_text(
+                "🔄 انتقال فقط در گروه انجام می‌شود.\n\n"
+                "روی پیام کاربر Reply کنید و بنویسید:\n"
+                "انتقال 500"
+            )
+
+            return
+
+        if text == "👥 زیرمجموعه":
+
+            await referrals(
+                update,
+                context,
+            )
+
+            return
+
+        if text == "🎧 پشتیبانی":
+
+            await support_start(
+                update,
+                context,
+            )
+
+            return
+
+        if text == "🛠 پنل مدیریت":
+
+            await admin_panel(
+                update,
+                context,
+            )
+
+            return
+
+        if text == "❌ لغو":
+
+            await cancel(
+                update,
+                context,
+            )
+
+            return
+
+    # =====================================================
+    # OWNER SUPPORT REPLY
+    # =====================================================
+
+    if await owner_reply_support(
+        update,
+        context,
+    ):
+        return
+
+    # =====================================================
+    # PHONE REQUIRED
+    # =====================================================
+
+    if not user["verified"]:
+
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
+
+        return
+
+    # =====================================================
+    # ADMIN STATES
+    # =====================================================
 
     if await admin_state_handler(
         update,
         context,
     ):
-
         return
+
+    # =====================================================
+    # CURRENT STATE
+    # =====================================================
 
     state = context.user_data.get(
         "state"
     )
-
-    # -------------------------
-    # Deposit
-    # -------------------------
 
     if state == "deposit_amount":
 
@@ -3502,10 +3708,6 @@ async def text_router(update, context):
 
         return
 
-    # -------------------------
-    # Withdraw
-    # -------------------------
-
     if state == "withdraw_amount":
 
         await withdraw_amount(
@@ -3524,23 +3726,6 @@ async def text_router(update, context):
 
         return
 
-    # -------------------------
-    # Transfer
-    # -------------------------
-
-    if state == "transfer_amount":
-
-        await transfer_amount(
-            update,
-            context,
-        )
-
-        return
-
-    # -------------------------
-    # Support
-    # -------------------------
-
     if state == "support":
 
         await support_message(
@@ -3550,151 +3735,45 @@ async def text_router(update, context):
 
         return
 
-    # -------------------------
-    # MAIN BUTTONS
-    # -------------------------
-
-    text = update.message.text.strip()
-
-    if text in (
-        "💳 موجودی",
-        "موجودی",
-    ):
-
-        await balance(
-            update,
-            context,
-        )
-
-        return
-
-    if text == "💰 واریزی":
-
-        await deposit_start(
-            update,
-            context,
-        )
-
-        return
-
-    if text == "💸 برداشت":
-
-        await withdraw_start(
-            update,
-            context,
-        )
-
-        return
-
-    if text == "🔄 انتقال":
-
-        await transfer_start(
-            update,
-            context,
-        )
-
-        return
-
-    if text == "👥 زیرمجموعه":
-
-        await referrals(
-            update,
-            context,
-        )
-
-        return
-
-    if text == "🎧 پشتیبانی":
-
-        await support_start(
-            update,
-            context,
-        )
-
-        return
-
-    if text == "🛠 پنل مدیریت":
-
-        await admin_panel(
-            update,
-            context,
-        )
-
-        return
-
-    # -------------------------
-    # GAME
-    # -------------------------
-
-    # مثال:
-    # بازی 500
-    game_match = re.fullmatch(
-        r"بازی\s+([0-9]+)",
-        text,
+    # پیام ناشناخته
+    await update.message.reply_text(
+        "❌ گزینه نامعتبر است.",
+        reply_markup=main_keyboard(
+            user["id"]
+        ),
     )
-
-    if game_match:
-
-        amount = int(
-            game_match.group(1)
-        )
-
-        # بازی در گروه
-        if update.effective_chat.type in (
-            "group",
-            "supergroup",
-        ):
-
-            await create_game(
-                update,
-                context,
-                amount,
-            )
-
-            return
-
-        await update.message.reply_text(
-            "❌ بازی را داخل گروه اجرا کنید."
-        )
-
-        return
-
-    # -------------------------
-    # انتقال فقط با Reply
-    # -------------------------
-
-    if text.startswith("انتقال"):
-
-        if update.effective_chat.type in (
-            "group",
-            "supergroup",
-        ):
-
-            await transfer_amount(
-                update,
-                context,
-            )
-
-            return
-
-        await update.message.reply_text(
-            "❌ انتقال فقط در گروه و با Reply انجام می‌شود."
-        )
-
-        return
 
 
 # =========================================================
 # MEDIA ROUTER
 # =========================================================
 
-async def media_router(update, context):
+async def media_router(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    if not update.effective_user:
+        return
+
+    # فقط خصوصی
+    if update.effective_chat.type != "private":
+        return
 
     user = create_or_update_user(
         update.effective_user
     )
 
     if user["blocked"]:
+        return
+
+    if not user["verified"]:
+
+        await update.message.reply_text(
+            "🔐 ابتدا شماره خود را تأیید کنید.",
+            reply_markup=verification_keyboard(),
+        )
+
         return
 
     state = context.user_data.get(
@@ -3719,29 +3798,8 @@ async def media_router(update, context):
 
         return
 
-    if state == "support_reply":
-
-        await admin_state_handler(
-            update,
-            context,
-        )
-
-        return
-
     await update.message.reply_text(
         "❌ ابتدا یک عملیات را انتخاب کنید."
-    )
-
-
-# =========================================================
-# COMMANDS
-# =========================================================
-
-async def command_balance(update, context):
-
-    await balance(
-        update,
-        context,
     )
 
 
@@ -3762,11 +3820,10 @@ def main():
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .concurrent_updates(True)
         .build()
     )
 
-    # فقط یک Router برای پیام‌های متنی
+    # فقط یک دستور اصلی
     application.add_handler(
         CommandHandler(
             "start",
@@ -3774,16 +3831,10 @@ def main():
         )
     )
 
-    application.add_handler(
-        CommandHandler(
-            "balance",
-            command_balance,
-        )
-    )
-
+    # دکمه‌های Inline
     application.add_handler(
         CallbackQueryHandler(
-            callback_router
+            callback_handler,
         )
     )
 
@@ -3795,44 +3846,39 @@ def main():
         )
     )
 
-    # متن
+    # عکس و فایل
     application.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_router,
-        )
-    )
-
-    # عکس / فایل
-    application.add_handler(
-        MessageHandler(
-            filters.PHOTO | filters.Document.ALL,
+            (
+                filters.PHOTO
+                | filters.Document.ALL
+            )
+            & ~filters.COMMAND,
             media_router,
         )
     )
 
-    logger.info(
-        "================================="
+    # متن
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND,
+            text_router,
+        )
     )
+
     logger.info(
-        "DOGS BOT STARTED"
-    )
-    logger.info(
-        "OWNER: %s",
-        get_owner_id(),
-    )
-    logger.info(
-        "BOT ENABLED: %s",
-        bot_enabled(),
-    )
-    logger.info(
-        "================================="
+        "TAK BET BOT STARTED"
     )
 
     application.run_polling(
         allowed_updates=Update.ALL_TYPES
     )
 
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
     main()
