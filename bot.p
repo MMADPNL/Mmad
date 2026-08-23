@@ -5339,10 +5339,6 @@ async def owner_transfer_callback(update, context):
         OWNER_TRANSFER_REQUESTS.pop(
             request_id,
             None
-
-          OWNER_TRANSFER_REQUESTS.pop(
-            request_id,
-            None
         )
 
         await query.answer(
